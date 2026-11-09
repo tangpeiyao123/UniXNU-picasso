@@ -178,6 +178,16 @@ jobs:
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
 
+      - name: Fetch the published GPU addon pair
+        run: |
+          mkdir -p out/picasso/gpu-addon
+          curl -sSL -o out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin \
+            https://github.com/silenzio111/UniXNU-picasso/releases/download/picasso-gpu-addon-gpu72/ngpu-addon-ios16-gl-gpu72.bin
+          curl -sSL -o out/picasso/gpu-addon/gpu-trust.bundle \
+            https://github.com/silenzio111/UniXNU-picasso/releases/download/picasso-gpu-addon-gpu72/gpu-trust.bundle
+          echo "75618b93ca16420f71777f7ee6e733cfedee5cdf23ee3e26a6cc8221f4cead0b  out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin" | shasum -a 256 -c -
+          echo "27ea321d7506f6a6f82751b61a7791848ddee938b22357e33f48e136a2ecbc0b  out/picasso/gpu-addon/gpu-trust.bundle" | shasum -a 256 -c -
+
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -192,7 +202,7 @@ jobs:
         run: |
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
-          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk --gpu-addon out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin --owner-trust-cache out/picasso/gpu-addon/gpu-trust.bundle --kernel-arg sheng-dpu-scanout=2 --kernel-arg sheng-gpu-perf-index=4 --kernel-arg sheng-gpu-gl=1 --kernel-arg glwait=0 --kernel-arg glhooks=1 2>&1 | tee out/picasso/logs/actions-build.log
           ccache -sv || true
           # Which options and inputs ccache refuses (the stats only count them).
           grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
