@@ -154,6 +154,26 @@ jobs:
           cp "out/ipsw/$PICASSO_BACKEND_BUILD/report.json" out/picasso/logs/kernel-donor.json
           echo "UNIXNU_KERNELCACHE=$PWD/out/ipsw/$PICASSO_BACKEND_BUILD/kernelcache.decompressed" >> "$GITHUB_ENV"
 
+      - name: Tune board.toml for the GPU addon payload
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('board.toml')
+          t = p.read_text(encoding='utf-8')
+          # DarwinBoot's command line is limited to 1000 bytes: drop the synthetic
+          # HID swipe trials and the M2V hand-off flag to make room for the GPU args
+          # (same trade-off as scripts/build-wf-payload.py).
+          for arg in ('offline-hid-swipe-delay=8', 'offline-hid-auto-home-count=8',
+                      'offline-hid-swipe=8', 'sheng-touch-hid=1', 'sheng-fb-gpu=1'):
+              t = t.replace('  "%s",\n' % arg, '')
+          assert 'sheng-touch-hid=1' not in t and 'sheng-fb-gpu=1' not in t, 'strip failed'
+          n = t.count('size_mib = 60')
+          assert n == 1, n
+          t = t.replace('size_mib = 60', 'size_mib = 80')
+          p.write_text(t, encoding='utf-8')
+          print('board.toml tuned: hid trials + fb-gpu dropped, payload size_mib=80')
+          PY
+
       - name: Reuse persistent Data seed (new seed requires explicit input)
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -187,26 +207,6 @@ jobs:
             https://github.com/silenzio111/UniXNU-picasso/releases/download/picasso-gpu-addon-gpu72/gpu-trust.bundle
           echo "75618b93ca16420f71777f7ee6e733cfedee5cdf23ee3e26a6cc8221f4cead0b  out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin" | shasum -a 256 -c -
           echo "27ea321d7506f6a6f82751b61a7791848ddee938b22357e33f48e136a2ecbc0b  out/picasso/gpu-addon/gpu-trust.bundle" | shasum -a 256 -c -
-
-      - name: Tune board.toml for the GPU addon payload
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('board.toml')
-          t = p.read_text(encoding='utf-8')
-          # DarwinBoot's command line is limited to 1000 bytes: drop the synthetic
-          # HID swipe trials and the M2V hand-off flag to make room for the GPU args
-          # (same trade-off as scripts/build-wf-payload.py).
-          for arg in ('offline-hid-swipe-delay=8', 'offline-hid-auto-home-count=8',
-                      'offline-hid-swipe=8', 'sheng-touch-hid=1', 'sheng-fb-gpu=1'):
-              t = t.replace('  "%s",\n' % arg, '')
-          assert 'sheng-touch-hid=1' not in t and 'sheng-fb-gpu=1' not in t, 'strip failed'
-          n = t.count('size_mib = 60')
-          assert n == 1, n
-          t = t.replace('size_mib = 60', 'size_mib = 80')
-          p.write_text(t, encoding='utf-8')
-          print('board.toml tuned: hid trials + fb-gpu dropped, payload size_mib=80')
-          PY
 
       - name: Build kernel + payload
         env:
