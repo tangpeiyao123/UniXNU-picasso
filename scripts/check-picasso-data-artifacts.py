@@ -229,7 +229,7 @@ def check(work, tree, output):
                 f'Storage target outside original component: {name}')
 
     payload = work / 'payload/payload.img'
-    require(payload.stat().st_size == 60 * 1024**2, 'Incorrect FAT payload size')
+    require(payload.stat().st_size == spec['size_mib'] * 1024**2, 'Incorrect FAT payload size')
     payload_report = json.loads(payload.with_suffix('.json').read_text())
     require(payload_report['payload_sha256'] == digest(payload), 'Stale payload report')
     data_path, payload_packed, transformation = payload_seed(work, spec, payload_report, packed, inspect)
