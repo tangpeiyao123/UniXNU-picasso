@@ -170,8 +170,15 @@ jobs:
           n = t.count('size_mib = 60')
           assert n == 1, n
           t = t.replace('size_mib = 60', 'size_mib = 80')
+          # Bake the GPU/GL route into board.toml so payload_report's kernel_args
+          # matches board.toml (the export audit compares the two literally).
+          gpu = ['sheng-gpu=4', 'sheng-gpu-addon=1', 'sheng-dpu-scanout=2',
+                 'sheng-gpu-perf-index=4', 'sheng-gpu-gl=1', 'glwait=0', 'glhooks=1']
+          anchor = '  "offline-hid-auto-home=5",\n'
+          assert t.count(anchor) == 1, 'kernel_args anchor not found'
+          t = t.replace(anchor, anchor + ''.join('  "%s",\n' % a for a in gpu))
           p.write_text(t, encoding='utf-8')
-          print('board.toml tuned: hid trials + fb-gpu dropped, payload size_mib=80')
+          print('board.toml tuned: hid trials + fb-gpu dropped, GPU args baked, size_mib=80')
           PY
 
       - name: Reuse persistent Data seed (new seed requires explicit input)
@@ -222,7 +229,7 @@ jobs:
         run: |
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
-          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk --gpu-addon out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin --owner-trust-cache out/picasso/gpu-addon/gpu-trust.bundle --kernel-arg sheng-gpu=4 --kernel-arg sheng-gpu-addon=1 --kernel-arg sheng-dpu-scanout=2 --kernel-arg sheng-gpu-perf-index=4 --kernel-arg sheng-gpu-gl=1 --kernel-arg glwait=0 --kernel-arg glhooks=1 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk --gpu-addon out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin --owner-trust-cache out/picasso/gpu-addon/gpu-trust.bundle 2>&1 | tee out/picasso/logs/actions-build.log
           ccache -sv || true
           # Which options and inputs ccache refuses (the stats only count them).
           grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
