@@ -322,10 +322,6 @@ jobs:
               print(f'Prelink includes {component}, start={start:#x}')
           PY
 
-      - name: Export audited iOS16 inputs for Linux builds
-        run: |
-          python3 scripts/picasso_linux_inputs.py export --tree "$UNIXNU_TREE"
-
       - name: Compose boot image (BootShim + repo FD + payload as ramdisk)
         run: |
           python3 ./unixnu bootimg \
@@ -339,14 +335,6 @@ jobs:
 
       # A few MiB of packed seeds must outlive the disposable kernel artifacts.
       # If all copies become unavailable, reuse fails instead of formatting APFS.
-      - name: Retain the exact Data seed independently
-        uses: actions/upload-artifact@v4
-        with:
-          name: picasso-data-seed-${{ github.run_number }}
-          path: device/out/picasso/linux-inputs/**
-          if-no-files-found: error
-          retention-days: 90
-
       - name: Upload boot image, diagnostic kernel, reports and reusable inputs
         if: always()
         uses: actions/upload-artifact@v4
