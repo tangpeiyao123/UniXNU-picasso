@@ -139,7 +139,7 @@ def verify_payload_policy(path, packed, preparation, identity, spec, jobs, polic
 def check(work, tree, output):
     board = tomllib.loads((ROOT / 'board.toml').read_text(encoding='utf-8'))
     spec = board['payload']
-    require(spec['size_mib'] == 60, 'Picasso payload must be 60 MiB')
+    require(spec['size_mib'] in (60, 80), 'Picasso payload must be 60 or 80 MiB')
     require(spec['adt'].get('packed_data_ramdisk') is True, 'Packed Data ADT mode required')
     require(spec['adt'].get('persistent_data') is True and spec['adt'].get('unprotected_developer_data') is True,
             'Require explicit unprotected developer Data')
