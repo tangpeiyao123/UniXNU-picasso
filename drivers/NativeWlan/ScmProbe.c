@@ -137,6 +137,42 @@ picasso_scm_call(const char *what, uint64_t function, uint64_t arguments,
 }
 
 /*
+ * 单次 SMC，不做重试、不做任何解释，把返回的全部寄存器原样打出来。
+ *
+ * 之所以需要它：picasso_scm_call 把 x0==1 当成"被中断"并重试 100 次，
+ * 最后只报 -1，x1..x6 到底是什么全被吞掉了。而 x0==1 在这块 TZ 上未必是
+ * "忙"——也可能就是成功码。看不到原始返回，就无法区分"TZ 锁死"和"我们读错"。
+ *
+ * 另外加一条 PSCI 对照（fnid 0x84000000 = PSCI_VERSION）：这台机器的 8 个 CPU
+ * 都是 PSCI 拉起来的，它必然可用。如果连它都返回垃圾，说明内联汇编本身有问题，
+ * 而不是 TZ 拒绝 SCM。
+ */
+static void
+picasso_smc_raw(const char *what, uint64_t fnid, uint64_t arguments)
+{
+	register uint64_t x0 __asm__("x0") = fnid;
+	register uint64_t x1 __asm__("x1") = arguments;
+	register uint64_t x2 __asm__("x2") = 0;
+	register uint64_t x3 __asm__("x3") = 0;
+	register uint64_t x4 __asm__("x4") = 0;
+	register uint64_t x5 __asm__("x5") = 0;
+	register uint64_t x6 __asm__("x6") = 0;
+	register uint64_t x7 __asm__("x7") = 0;
+
+	__asm__ volatile ("smc #0"
+	    : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3),
+	      "+r" (x4), "+r" (x5), "+r" (x6), "+r" (x7)
+	    :
+	    : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+	      "x16", "x17", "memory");
+
+	IOLog("PICASSO_SCM raw %s fnid=%#llx arg=%#llx -> x0=%#llx x1=%#llx x2=%#llx x3=%#llx x6=%#llx\n",
+	    what, (unsigned long long)fnid, (unsigned long long)arguments,
+	    (unsigned long long)x0, (unsigned long long)x1, (unsigned long long)x2,
+	    (unsigned long long)x3, (unsigned long long)x6);
+}
+
+/*
  * IS_CALL_AVAILABLE 的两种入参形态都试一次。
  *
  * Linux 的 __qcom_scm_is_call_available() 传 1 个值：把 (svc, cmd) 打包进 args[0]。
@@ -207,6 +243,20 @@ picasso_scm_probe(void)
 	uint64_t answer = 0;
 
 	IOLog("PICASSO_SCM probe begin (read-only: GET_VERSION + IS_CALL_AVAILABLE only)\n");
+
+	/*
+	 * --- 0. 原始返回与控制组 ---
+	 *
+	 * PSCI_VERSION 是控制组：它必然可用（CPU 就是它拉起来的）。如果它返回
+	 * 0x00010001 这类正常版本号，说明内联汇编与寄存器传参是对的，那么 SCM
+	 * 返回 1 就是 TZ 的真实回应；如果它也返回垃圾，问题在我们自己的代码。
+	 */
+	picasso_smc_raw("PSCI_VERSION", 0x84000000ull, 0);
+	picasso_smc_raw("SCM_GET_VERSION(1,1)+flags",
+	    PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_VERSION)
+	        | PICASSO_SCM_64 | PICASSO_SCM_SIP, 0);
+	picasso_smc_raw("SCM_GET_VERSION(1,1)no-flags",
+	    PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_VERSION), 0);
 
 	/* --- 1. GET_VERSION：两种常见的 (svc, cmd) 组合各试一次 --- */
 	status = picasso_scm_call("GET_VERSION(1,1)",
