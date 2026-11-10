@@ -169,11 +169,16 @@ def extract(archive, output):
                     (entry.external_attr >> 16 & 0o170000) in (0, 0o100000) and 0 < entry.file_size <= limit,
                     'Duplicate, unsafe or unbounded iOS16 artifact member')
             selected[name] = entry
-        require(set(selected) == {*FILES, 'manifest.json'}, 'Compose artifact has no reusable iOS16 input bundle')
+        # A boot-image artifact has the same producer workflow but carries no
+        # inputs; scanning must step over it, not treat it as a damaged seed.
+        # Only a bundle that names every input (and fails validate) is fatal.
+        if set(selected) != {*FILES, 'manifest.json'}:
+            return False
         output.mkdir(exist_ok=False)
         for name, entry in selected.items():
             with bundle.open(entry) as source, (output / name).open('xb') as target:
                 shutil.copyfileobj(source, target)
+        return True
 
 
 def api(repository, path):
@@ -219,7 +224,8 @@ def acquire(repository, branch, tree, output):
                     require(archive.stat().st_size == artifact['size_in_bytes'] and digest(archive) == checksum[7:],
                             'Compose archive hash/size mismatch')
                     staged = Path(temporary) / 'inputs'
-                    extract(archive, staged)
+                    if not extract(archive, staged):
+                        continue
                     candidate = json.loads((staged / 'manifest.json').read_text(encoding='utf-8'))
                     if candidate.get('recipe_sha256') != recipe(tree):
                         continue  # A matching exporter can serve another iOS16 seed recipe.
