@@ -9,6 +9,7 @@ extern "C" {
 void native_adreno620_set_embedded_firmware(void);
 void native_adreno_probe(void);
 void native_wlan_probe(void);
+void picasso_scm_probe(void);
 void sheng_cpufreq_probe(void);
 void sheng_cpufreq_poll(void);
 void picasso_pr13_start(void);
@@ -30,6 +31,7 @@ static void probes(void *, wait_result_t) {
     native_adreno620_set_embedded_firmware();
     native_adreno_probe();
     native_wlan_probe();
+    picasso_scm_probe();   /* read-only TZ/PAS capability query; boot-arg sheng-scm=1 */
     bool reported = false;
     for (;;) {
         sheng_cpufreq_poll();
