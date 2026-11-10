@@ -64,6 +64,25 @@
 #define PICASSO_SCM_INTERRUPTED 1ull
 #define PICASSO_SCM_RETRIES     100
 
+/*
+ * arginfo（x1）的两种可能编码。
+ *
+ * [参考实现依据] hakios.mpss.c:1285-1287 + 3564：
+ *      SCM_ONE_VALUE 1 / SCM_THREE_VALUES 3 / SCM_VALUE_AND_BUFFER (2 | 2<<6)
+ *      SCM_ASSIGN_ARGUMENTS 0x1117   -- 注释写 "seven: a buffer, a value, ..."
+ * 三个常量互相对照可以看出：**参数个数在 bit 0-3，参数类型从 bit 4 开始每 2 位一个**。
+ *   0x1117 的低 4 位 = 7，与注释的 "seven" 吻合。
+ * 这与 Linux qcom_scm.h 的 QCOM_SCM_ARGS 宏布局一致，所以 QCOM_SCM_ARGS(1) == 1。
+ *
+ * 但参考实现本身也是从 Linux 移植的，不能当作"这台设备 TZ 一定认"的证明，
+ * 因此探针把两种都试一次：
+ *   PICASSO_ARGINFO_PLAIN  = 1     (1 个参数，类型位全 0)
+ *   PICASSO_ARGINFO_VAL    = 0x11  (1 个参数，类型 VAL=1)
+ * 全是只读查询，多试一种没有副作用。
+ */
+#define PICASSO_ARGINFO_PLAIN   1ull
+#define PICASSO_ARGINFO_VAL     0x11ull
+
 /* 探针累计调用次数，便于在长日志里确认只跑过一轮 */
 volatile uint32_t picasso_scm_probe_calls;
 volatile int32_t  picasso_scm_version_status = -999;
@@ -128,26 +147,45 @@ picasso_scm_call(const char *what, uint64_t function, uint64_t arguments,
 static void
 picasso_scm_is_call_available(const char *label, uint32_t svc, uint32_t cmd)
 {
-	const uint64_t plain = PICASSO_SCM_CALL(svc, cmd);
-	const uint64_t flagged = PICASSO_SCM_CALL(svc, cmd) | PICASSO_SCM_64 | PICASSO_SCM_SIP;
-	int32_t st_plain, st_flagged;
-	uint64_t ans_plain = 0, ans_flagged = 0;
+	/* 二维：arginfo 两种编码 × args[0] 两种打包。任一组合被接受即认为该命令可用。 */
+	static const struct {
+		uint64_t arginfo;
+		const char *name;
+	} infos[] = {
+		{ PICASSO_ARGINFO_PLAIN, "arginfo=1" },
+		{ PICASSO_ARGINFO_VAL,   "arginfo=0x11" },
+	};
+	static const struct {
+		uint64_t pack;
+		const char *name;
+	} packs[] = {
+		{ 0, "pack=svc<<8|cmd" },
+		{ PICASSO_SCM_64 | PICASSO_SCM_SIP, "pack=+SIP|64" },
+	};
 
-	st_plain = picasso_scm_call("IS_CALL_AVAILABLE(plain)",
-	    PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_IS_CALL_AVAIL),
-	    1, plain, 0, 0, 0, &ans_plain);
-	IOLog("PICASSO_SCM iscall %s plain arg=%#llx -> status=%d answer=%#llx\n",
-	    label, (unsigned long long)plain, st_plain, (unsigned long long)ans_plain);
+	const uint64_t base = PICASSO_SCM_CALL(svc, cmd);
+	const uint64_t fnid = PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_IS_CALL_AVAIL);
+	unsigned accepted = 0;
 
-	st_flagged = picasso_scm_call("IS_CALL_AVAILABLE(flagged)",
-	    PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_IS_CALL_AVAIL),
-	    1, flagged, 0, 0, 0, &ans_flagged);
-	IOLog("PICASSO_SCM iscall %s flagged arg=%#llx -> status=%d answer=%#llx\n",
-	    label, (unsigned long long)flagged, st_flagged, (unsigned long long)ans_flagged);
+	const size_t ninfos = sizeof(infos) / sizeof(infos[0]);
+	const size_t npacks = sizeof(packs) / sizeof(packs[0]);
 
-	/* 判定：status==0 且 answer 非 0 视为"该调用可用"（Linux 语义：返回 1 表示可用）。
-	 * 两种入参各自的 answer 分开保存，避免用后一次的结果去判前一次。 */
-	if ((st_plain == 0 && ans_plain != 0) || (st_flagged == 0 && ans_flagged != 0)) {
+	for (size_t i = 0; i < ninfos; i++) {
+		for (size_t k = 0; k < npacks; k++) {
+			const uint64_t arg0 = base | packs[k].pack;
+			uint64_t answer = 0;
+			const int32_t status = picasso_scm_call("IS_CALL_AVAILABLE",
+			    fnid, infos[i].arginfo, arg0, 0, 0, 0, &answer);
+			IOLog("PICASSO_SCM iscall %s %s %s arg=%#llx -> status=%d answer=%#llx\n",
+			    label, infos[i].name, packs[k].name,
+			    (unsigned long long)arg0, status, (unsigned long long)answer);
+			if (status == 0 && answer != 0) {
+				accepted = 1;
+			}
+		}
+	}
+
+	if (accepted) {
 		__atomic_add_fetch(&picasso_scm_pas_available_count, 1u, __ATOMIC_RELAXED);
 	}
 }
