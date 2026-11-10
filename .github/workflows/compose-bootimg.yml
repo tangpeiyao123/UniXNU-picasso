@@ -174,7 +174,9 @@ jobs:
           # matches board.toml (the export audit compares the two literally).
           # sheng-scm=1 turns on the read-only SCM/TZ capability probe
           # (drivers/NativeWlan/ScmProbe.c). Budget: 980/1000 bytes.
-          gpu = ['sheng-gpu=4', 'sheng-gpu-addon=1', 'sheng-dpu-scanout=2',
+          # sheng-gpu-metal=1 clears the CPU accelerator stub (PicassoDisplay.cpp:292);
+          # without it CoreAnimation stays on the software path and the GPU idles.
+          gpu = ['sheng-gpu=4', 'sheng-gpu-metal=1', 'sheng-gpu-addon=1', 'sheng-dpu-scanout=2',
                  'sheng-gpu-perf-index=4', 'sheng-gpu-gl=1', 'glwait=0', 'glhooks=1',
                  'sheng-scm=1']
           anchor = '  "offline-hid-auto-home=5",\n'
