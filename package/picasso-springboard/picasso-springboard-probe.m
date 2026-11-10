@@ -39,6 +39,41 @@ static void picasso_ack(const char *name)
 #include "picasso-astc-guard.m"
 #include "picasso-statusbar-metrics.m"
 
+// 屏幕事实一次性打全。键盘右侧被裁掉 45 px 这件事换了机型（D22→iPhone13,1）、
+// 换了 display-scale（3→2）都没变化，说明它既不看 hw.machine 也不看逻辑宽度。
+// 继续猜没有意义，直接把 UIKit 眼里的四个数打出来：
+//   bounds       —— UIKit 布局用的逻辑尺寸（pt）
+//   nativeBounds —— 原生像素尺寸
+//   scale/nativeScale —— 两者之间的换算
+// 再带上 hw.machine / hw.model / idiom，就能确定 1125 这个数到底从哪来。
+static void picasso_screen_report(void)
+{
+    UIScreen *screen = [UIScreen mainScreen];
+    if (!screen) return;
+    CGRect bounds = screen.bounds;
+    CGRect native = screen.nativeBounds;
+    char machine[64] = {0};
+    char model[64] = {0};
+    size_t length = sizeof(machine) - 1;
+    (void)sysctlbyname("hw.machine", machine, &length, NULL, 0);
+    length = sizeof(model) - 1;
+    (void)sysctlbyname("hw.model", model, &length, NULL, 0);
+    char line[320];
+    int wrote = snprintf(line, sizeof(line),
+        "PICASSO_SCREEN bounds=%.0fx%.0f native=%.0fx%.0f scale=%.2f nscale=%.2f idiom=%ld machine=%s model=%s\n",
+        bounds.size.width, bounds.size.height,
+        native.size.width, native.size.height,
+        screen.scale, screen.nativeScale,
+        (long)[[UIDevice currentDevice] userInterfaceIdiom],
+        machine, model);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(line)) return;
+    int fd = open("/dev/console", O_WRONLY);
+    if (fd >= 0) {
+        (void)write(fd, line, (size_t)wrote);
+        close(fd);
+    }
+}
+
 static void picasso_statusbar_start(void)
 {
     BOOL installed = picasso_install_statusbar();
@@ -67,6 +102,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     @autoreleasepool {
+        picasso_screen_report();
         picasso_statusbar_start();
         picasso_install_astc_guard();
     }
