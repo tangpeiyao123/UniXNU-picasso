@@ -339,7 +339,7 @@ def build_wlan(record: dict):
     out.mkdir(parents=True, exist_ok=True)
     driver = ROOT / 'drivers/NativeWlan'
     objects = []
-    for name in ('WlanBoard.cpp', 'WlanProbe.cpp', 'WlanFirmware.c'):
+    for name in ('WlanBoard.cpp', 'WlanProbe.cpp', 'WlanFirmware.c', 'ScmProbe.c'):
         obj = out / (Path(name).stem + '.o')
         compile_file(driver / name, obj, record, ['-I', str(driver)], is_c=name.endswith('.c'))
         objects.append(obj)
