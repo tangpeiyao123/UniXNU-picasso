@@ -172,8 +172,11 @@ jobs:
           t = t.replace('size_mib = 60', 'size_mib = 80')
           # Bake the GPU/GL route into board.toml so payload_report's kernel_args
           # matches board.toml (the export audit compares the two literally).
+          # sheng-scm=1 turns on the read-only SCM/TZ capability probe
+          # (drivers/NativeWlan/ScmProbe.c). Budget: 980/1000 bytes.
           gpu = ['sheng-gpu=4', 'sheng-gpu-addon=1', 'sheng-dpu-scanout=2',
-                 'sheng-gpu-perf-index=4', 'sheng-gpu-gl=1', 'glwait=0', 'glhooks=1']
+                 'sheng-gpu-perf-index=4', 'sheng-gpu-gl=1', 'glwait=0', 'glhooks=1',
+                 'sheng-scm=1']
           anchor = '  "offline-hid-auto-home=5",\n'
           assert t.count(anchor) == 1, 'kernel_args anchor not found'
           t = t.replace(anchor, anchor + ''.join('  "%s",\n' % a for a in gpu))
@@ -215,6 +218,19 @@ jobs:
           echo "75618b93ca16420f71777f7ee6e733cfedee5cdf23ee3e26a6cc8221f4cead0b  out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin" | shasum -a 256 -c -
           echo "27ea321d7506f6a6f82751b61a7791848ddee938b22357e33f48e136a2ecbc0b  out/picasso/gpu-addon/gpu-trust.bundle" | shasum -a 256 -c -
 
+      - name: Merge owner trust caches (GPU addon + UI inject library)
+        run: |
+          UI=out/picasso/ui-trust.bundle
+          GPU=out/picasso/gpu-addon/gpu-trust.bundle
+          if [ -f "$UI" ]; then
+            python3 scripts/merge_trust.py --out out/picasso/trust-merged.bundle \
+              --bundle "$GPU" --bundle "$UI"
+          else
+            echo "UI trust bundle absent; keeping the GPU bundle as-is"
+            cp "$GPU" out/picasso/trust-merged.bundle
+          fi
+          python3 scripts/merge_trust.py --show out/picasso/trust-merged.bundle
+
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -229,7 +245,7 @@ jobs:
         run: |
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
-          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk --gpu-addon out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin --owner-trust-cache out/picasso/gpu-addon/gpu-trust.bundle 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk --gpu-addon out/picasso/gpu-addon/ngpu-addon-ios16-gl-gpu72.bin --owner-trust-cache out/picasso/trust-merged.bundle 2>&1 | tee out/picasso/logs/actions-build.log
           ccache -sv || true
           # Which options and inputs ccache refuses (the stats only count them).
           grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
