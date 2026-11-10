@@ -104,6 +104,7 @@ picasso_scm_call(const char *what, uint64_t function, uint64_t arguments,
 {
 	uint64_t session = 0;
 	const uint64_t fnid = function | PICASSO_SCM_64 | PICASSO_SCM_SIP;
+	uint64_t last_x0 = 0, last_x1 = 0, last_x6 = 0;
 
 	for (int attempt = 0; attempt < PICASSO_SCM_RETRIES; attempt++) {
 		register uint64_t x0 __asm__("x0") = attempt == 0 ? fnid : PICASSO_SCM_INTERRUPTED;
@@ -123,6 +124,9 @@ picasso_scm_call(const char *what, uint64_t function, uint64_t arguments,
 		      "x16", "x17", "memory");
 
 		session = x6;
+		last_x0 = x0;
+		last_x1 = x1;
+		last_x6 = x6;
 		if (x0 != PICASSO_SCM_INTERRUPTED) {
 			if (answer) {
 				*answer = x1;
@@ -131,9 +135,23 @@ picasso_scm_call(const char *what, uint64_t function, uint64_t arguments,
 			return (int32_t)x0;
 		}
 	}
-	IOLog("PICASSO_SCM %s: TZ kept returning INTERRUPTED after %d tries\n",
-	    what, PICASSO_SCM_RETRIES);
-	return -1;
+	/*
+	 * 重试用尽时返回**原始 x0**，不再合成 -1。
+	 *
+	 * 合成 -1 会把"TZ 一直回 1"伪装成"我们放弃了"，两者在日志上无法区分——
+	 * 上一轮就是因此把 22 次调用误读成"SCM 全灭"，进而错判音频/WiFi 不可做。
+	 * 参考实现（hakios.mpss.c:1278-1345）里 SCM_INTERRUPTED 同样是 1，
+	 * 且它成功启动过 K20 Pro 的 modem，说明那台机器上成功码是 0。
+	 * 所以这里只如实上报，不代替硬件下结论。
+	 */
+	if (answer) {
+		*answer = last_x1;
+	}
+	__atomic_add_fetch(&picasso_scm_probe_calls, 1, __ATOMIC_RELAXED);
+	IOLog("PICASSO_SCM %s: x0 stayed %#llx for %d tries (x1=%#llx x6=%#llx), reporting raw\n",
+	    what, (unsigned long long)last_x0, PICASSO_SCM_RETRIES,
+	    (unsigned long long)last_x1, (unsigned long long)last_x6);
+	return (int32_t)last_x0;
 }
 
 /*
