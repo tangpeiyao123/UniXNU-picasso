@@ -88,6 +88,7 @@ volatile uint32_t picasso_scm_probe_calls;
 volatile int32_t  picasso_scm_version_status = -999;
 volatile uint64_t picasso_scm_version_value;
 volatile uint32_t picasso_scm_pas_available_count;
+volatile uint32_t picasso_scm_el2;   /* ID_AA64PFR0_EL1.EL2 field: 0 = EL2 not implemented */
 
 /*
  * 一次 SMC 调用。寄存器布局与重试逻辑照搬参考实现：
@@ -191,6 +192,51 @@ picasso_smc_raw(const char *what, uint64_t fnid, uint64_t arguments)
 }
 
 /*
+ * EL2 是否实现 —— 决定 SCM 走 smc（EL3/TZ）还是 hvc（EL2/hypervisor）。
+ *
+ * 门 0 实测 smc 的 SIP 调用返回 NOT_SUPPORTED（0xffffffffffffffff），
+ * 但那只排除了 EL3 的 TZ。部分高通平台把 SCM 服务挂在 EL2 的 hypervisor 上，
+ * 此时正确的入口是 hvc #0 而非 smc #0。
+ * ID_AA64PFR0_EL1 的 bits[11:8] 是 EL2 字段：0 = 未实现，1 = 仅 EL2，2 = EL2 + 安全 EL2。
+ */
+static uint64_t
+picasso_read_pfr0(void)
+{
+	uint64_t value = 0;
+	__asm__ volatile ("mrs %0, id_aa64pfr0_el1" : "=r" (value));
+	return value;
+}
+
+/*
+ * 单次 HVC，与 picasso_smc_raw 完全对称，只把指令换成 hvc #0。
+ * 不做重试、不做解释，原样打印返回寄存器。
+ */
+static void
+picasso_hvc_raw(const char *what, uint64_t fnid, uint64_t arguments)
+{
+	register uint64_t x0 __asm__("x0") = fnid;
+	register uint64_t x1 __asm__("x1") = arguments;
+	register uint64_t x2 __asm__("x2") = 0;
+	register uint64_t x3 __asm__("x3") = 0;
+	register uint64_t x4 __asm__("x4") = 0;
+	register uint64_t x5 __asm__("x5") = 0;
+	register uint64_t x6 __asm__("x6") = 0;
+	register uint64_t x7 __asm__("x7") = 0;
+
+	__asm__ volatile ("hvc #0"
+	    : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3),
+	      "+r" (x4), "+r" (x5), "+r" (x6), "+r" (x7)
+	    :
+	    : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+	      "x16", "x17", "memory");
+
+	IOLog("PICASSO_SCM hvc %s fnid=%#llx arg=%#llx -> x0=%#llx x1=%#llx x2=%#llx x3=%#llx x6=%#llx\n",
+	    what, (unsigned long long)fnid, (unsigned long long)arguments,
+	    (unsigned long long)x0, (unsigned long long)x1, (unsigned long long)x2,
+	    (unsigned long long)x3, (unsigned long long)x6);
+}
+
+/*
  * IS_CALL_AVAILABLE 的两种入参形态都试一次。
  *
  * Linux 的 __qcom_scm_is_call_available() 传 1 个值：把 (svc, cmd) 打包进 args[0]。
@@ -275,6 +321,28 @@ picasso_scm_probe(void)
 	        | PICASSO_SCM_64 | PICASSO_SCM_SIP, 0);
 	picasso_smc_raw("SCM_GET_VERSION(1,1)no-flags",
 	    PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_VERSION), 0);
+
+	/*
+	 * --- 0.1 EL2 检查 + hvc 对照 ---
+	 *
+	 * smc 走 EL3/TZ；若 TZ 不暴露 SCM，而 EL2 hypervisor 实现了，SCM 可能挂在 EL2，
+	 * 需用 hvc #0 重发。ID_AA64PFR0_EL1.EL2 字段决定 hvc 是否有对话对象。
+	 */
+	{
+		const uint64_t pfr0 = picasso_read_pfr0();
+		const unsigned el2 = (unsigned)((pfr0 >> 8) & 0xfu);
+		__atomic_store_n(&picasso_scm_el2, el2, __ATOMIC_RELAXED);
+		IOLog("PICASSO_SCM ID_AA64PFR0_EL1=%#llx el2=%u\n",
+		    (unsigned long long)pfr0, el2);
+		if (el2 != 0) {
+			picasso_hvc_raw("PSCI_VERSION", 0x84000000ull, 0);
+			picasso_hvc_raw("SCM_GET_VERSION(1,1)+flags",
+			    PICASSO_SCM_CALL(PICASSO_SCM_SVC_INFO, PICASSO_SCM_INFO_VERSION)
+			        | PICASSO_SCM_64 | PICASSO_SCM_SIP, 0);
+		} else {
+			IOLog("PICASSO_SCM hvc skipped: EL2 not implemented (el2=%u)\n", el2);
+		}
+	}
 
 	/* --- 1. GET_VERSION：两种常见的 (svc, cmd) 组合各试一次 --- */
 	status = picasso_scm_call("GET_VERSION(1,1)",
