@@ -10,6 +10,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
+#include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/pwr_mgt/IOPM.h>
@@ -20,6 +22,8 @@
 #include <libkern/c++/OSSymbol.h>
 #include <sys/proc.h>
 #include "OriginalAcceleratorABI.h"
+#include "PicassoBatteryCore.h"
+#include "PicassoSpmi.h"
 
 class PicassoAcceleratorUserClient : public IOUserClient {
     OSDeclareDefaultStructors(PicassoAcceleratorUserClient);
@@ -95,19 +99,111 @@ void PicassoPowerSource::number(const char *key, unsigned long long value) {
     OSSafeReleaseNULL(symbol);
 }
 
+// ---- battery -------------------------------------------------------------------
+// PM7250B's VADC, reached through the SPMI arbiter. Every step here is bounded and
+// read-mostly: any unexpected state returns false, the reason is logged once, and the
+// caller keeps the fixed properties it published before. Nothing is guessed: the slot
+// is taken from the arbiter's own mapping table (never computed from the PPID), and the
+// two on-chip references (0 V, 1.25 V) provide the calibration, so no data-sheet
+// constant is involved.
+namespace {
+
+struct VadcMap {
+    IOMemoryMap *map = nullptr;
+    volatile uint32_t *va = nullptr;
+    bool open(uint64_t base, uint64_t size) {
+        IODeviceMemory *memory = IODeviceMemory::withRange(base, size);
+        map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+        OSSafeReleaseNULL(memory);
+        va = map ? reinterpret_cast<volatile uint32_t *>(map->getVirtualAddress()) : nullptr;
+        return va != nullptr;
+    }
+    ~VadcMap() { OSSafeReleaseNULL(map); }
+};
+
+// One conversion, in the ADC5 order: parameters, enable, channel, request.
+bool convertChannel(volatile uint32_t *window, uint8_t channel, unsigned &code) {
+    using namespace picasso_battery::core;
+    if (picasso_spmi_write8(window, regDigParam, 0)) return false;
+    if (picasso_spmi_write8(window, regEnCtl1, enAdc)) return false;
+    if (picasso_spmi_write8(window, regChannel, channel)) return false;
+    if (picasso_spmi_write8(window, regConvReq, convRequest)) return false;
+    for (unsigned poll = 0; poll < 20; ++poll) {
+        uint8_t status = 0;
+        if (picasso_spmi_read8(window, regStatus1, status)) return false;
+        if (status & picasso_battery::core::statusConvFault) return false;
+        if (status & picasso_battery::core::statusEoc) {
+            uint8_t lsb = 0, msb = 0;
+            if (picasso_spmi_read8(window, regData0, lsb)) return false;
+            if (picasso_spmi_read8(window, regData1, msb)) return false;
+            code = (unsigned(msb) << 8) | lsb;
+            return true;
+        }
+        IODelay(100);
+    }
+    return false;
+}
+
+// Two slots claiming the same page is a reason to stop: this path writes to the slot.
+int findVadcSlot(volatile uint32_t *core, volatile uint32_t *owners) {
+    using namespace picasso_battery::core;
+    int found = apidAbsent;
+    for (unsigned slot = 0; slot < apidSlots; ++slot) {
+        const uint32_t mapping = core[(mapOffset + slot * 4) / 4];
+        if (!mappingNames(mapping, ppidVadc)) continue;
+        if (!ownerIsApps(owners[(ownerOffset + slot * 4) / 4])) continue;
+        if (found != apidAbsent) return apidAmbiguous;
+        found = int(slot);
+    }
+    return found;
+}
+
+bool readPackMillivolts(unsigned &millivoltsOut) {
+    using namespace picasso_battery::core;
+    const char *why = "?";
+    unsigned gnd = 0, reference = 0, raw = 0;
+    int slot = apidAbsent;
+    do {
+        if (!picasso_spmi_init()) { why = "spmi"; break; }
+        VadcMap core, owners, block;
+        if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) { why = "arbiter"; break; }
+        slot = findVadcSlot(core.va, owners.va);
+        if (slot < 0) { why = slot == apidAmbiguous ? "ambiguous" : "absent"; break; }
+        if (!block.open(0xe600000ull + uint64_t(slot) * apidStride, apidStride)) { why = "window"; break; }
+        if (!convertChannel(block.va, channelGnd, gnd)) { why = "gnd"; break; }
+        if (!convertChannel(block.va, channelRef, reference)) { why = "ref"; break; }
+        if (!convertChannel(block.va, channelVbat, raw)) { why = "vbat"; break; }
+        Scale scale;
+        if (!scaleFrom(gnd, reference, scale)) { why = "calibration"; break; }
+        if (!millivolts(raw, scale, millivoltsOut)) { why = "range"; break; }
+        IOLog("PICASSO_BATT slot=%d gnd=%u ref=%u vbat=%u mv=%u pct=%d\n",
+            slot, gnd, reference, raw, millivoltsOut, percentFor(millivoltsOut));
+        return true;
+    } while (false);
+    IOLog("PICASSO_BATT refused reason=%s slot=%d gnd=%u ref=%u vbat=%u\n", why, slot, gnd, reference, raw);
+    return false;
+}
+
+}  // namespace
+
 void PicassoPowerSource::publishFixedState() {
+    unsigned packMillivolts = 0;
+    const bool measured = readPackMillivolts(packMillivolts);
     setBatteryInstalled(true);
     setExternalConnected(true);
     setExternalChargeCapable(true);
     setIsCharging(false);
+    // "Fully charged" is only honest when the measurement says so; with no reading we
+    // keep the previous fixed state rather than invent one.
     const OSSymbol *full = OSSymbol::withCString("FullyCharged");
-    if (full) setPSProperty(full, kOSBooleanTrue);
+    if (full && (!measured || picasso_battery::core::percentFor(packMillivolts) >= 100))
+        setPSProperty(full, kOSBooleanTrue);
     OSSafeReleaseNULL(full);
-    setCurrentCapacity(100);
+    setCurrentCapacity(measured ? picasso_battery::core::percentFor(packMillivolts) : 100);
     setMaxCapacity(100);
-    setVoltage(4400);
+    setVoltage(measured ? packMillivolts : 4400);
     setAmperage(0);
-    number("AppleRawCurrentCapacity", 4500);
+    number("AppleRawCurrentCapacity", measured ? picasso_battery::core::percentFor(packMillivolts) : 4500);
     number("AppleRawMaxCapacity", 4500);
     number("DesignCapacity", 4500);
     OSDictionary *adapter = OSDictionary::withCapacity(4);
