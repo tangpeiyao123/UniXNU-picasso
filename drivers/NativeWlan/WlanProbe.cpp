@@ -35,6 +35,8 @@ volatile uint32_t native_wlan_smmu_smr, native_wlan_smmu_s2cr;
 volatile uint32_t native_wlan_sid = WLAN_SMMU_SID;
 volatile uint64_t native_wlan_msa_base = WLAN_MSA_BASE, native_wlan_msa_size = WLAN_MSA_SIZE;
 volatile uint32_t native_wlan_msa_pages, native_wlan_msa_word;
+volatile uint32_t native_wlan_msa_head[16];   // first 64 bytes of the MSA region
+volatile uint32_t native_wlan_msa_elf;         // 1 when the head starts with the ELF magic
 volatile uint32_t native_wlan_fw_present, native_wlan_fw_segments, native_wlan_fw_hash, native_wlan_fw_payload;
 volatile uint32_t native_wlan_handshake_step;
 volatile int native_wlan_handshake_error;
@@ -108,6 +110,27 @@ static void smemSurvey() {
         int parsed=found ? found : wlan_smp2p_wlan(&io,&item,i ? 0 : 1,i ? 1 : 0,&value);
         printf("PICASSO_WLAN smp2p item=%u found=%d parsed=%d wlan=%x\n",ids[i],found,parsed,value);
     }
+}
+
+// The MSA region (pil_wlan_fw_region@0x8ba00000, 2 MiB, no-map) is where the modem/WLFW stages
+// wlanmdsp.mbn (ELF32 Hexagon). Reading its first 64 bytes tells us whether firmware has actually
+// been staged there: an ELF magic means MPSS ran far enough to write it; all-zero means it has not.
+// Purely read-only — no register is touched and MPSS is never started.
+static void msaSurvey() {
+    Region region = {};
+    if (!mapRegion(WLAN_MSA_BASE, 0x1000, region)) {
+        printf("PICASSO_WLAN msa map error=%d\n", WLAN_ERR_NOMEM); return;
+    }
+    for (unsigned i = 0; i < 16; ++i) native_wlan_msa_head[i] = rd32(region.va, 4 * i);
+    // ELF32 little-endian magic: bytes 0x7f 'E' 'L' 'F' read as one word = 0x464c457f.
+    native_wlan_msa_elf = (native_wlan_msa_head[0] == 0x464c457fu) ? 1 : 0;
+    printf("PICASSO_WLAN msa head: %08x %08x %08x %08x %08x %08x %08x %08x | "
+           "%08x %08x %08x %08x %08x %08x %08x %08x elf=%u\n",
+           native_wlan_msa_head[0], native_wlan_msa_head[1], native_wlan_msa_head[2], native_wlan_msa_head[3],
+           native_wlan_msa_head[4], native_wlan_msa_head[5], native_wlan_msa_head[6], native_wlan_msa_head[7],
+           native_wlan_msa_head[8], native_wlan_msa_head[9], native_wlan_msa_head[10], native_wlan_msa_head[11],
+           native_wlan_msa_head[12], native_wlan_msa_head[13], native_wlan_msa_head[14], native_wlan_msa_head[15],
+           native_wlan_msa_elf);
 }
 
 // Stage 1: validate static rail descriptions. No WCSS MMIO before mission mode.
@@ -289,7 +312,7 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 // weak_import and link whether or not this driver is included.
 extern "C" void native_wlan_probe(void) {
     static bool surveyed;
-    if (!surveyed) { surveyed=true; smemSurvey(); }
+    if (!surveyed) { surveyed=true; smemSurvey(); msaSurvey(); }
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
     if (native_wlan_stage_req) return;
