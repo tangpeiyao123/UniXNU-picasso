@@ -22,7 +22,6 @@
 #include <libkern/c++/OSSymbol.h>
 #include <sys/proc.h>
 #include "OriginalAcceleratorABI.h"
-#include "PicassoBatteryCore.h"
 #include "PicassoSpmi.h"
 
 class PicassoAcceleratorUserClient : public IOUserClient {
@@ -100,13 +99,30 @@ void PicassoPowerSource::number(const char *key, unsigned long long value) {
 }
 
 // ---- battery -------------------------------------------------------------------
-// PM7250B's VADC, reached through the SPMI arbiter. Every step here is bounded and
-// read-mostly: any unexpected state returns false, the reason is logged once, and the
-// caller keeps the fixed properties it published before. Nothing is guessed: the slot
-// is taken from the arbiter's own mapping table (never computed from the PPID), and the
-// two on-chip references (0 V, 1.25 V) provide the calibration, so no data-sheet
-// constant is involved.
+// PM7250B's VADC through the SPMI arbiter. Read-mostly and bounded: any unexpected state
+// returns false, one PICASSO_BATT line says why, and the caller keeps the fixed values it
+// already published. The slot comes from the arbiter's own mapping table (never computed
+// from the PPID), and the two on-chip references (0 V, 1.25 V) are the calibration, so no
+// data-sheet constant is involved. Self-contained on purpose: this file is compiled from
+// kits/picasso, where a newly added header would not be present.
 namespace {
+
+enum : uint8_t {
+    regStatus1 = 0x08, regDigParam = 0x42, regChannel = 0x44, regEnCtl1 = 0x46,
+    regConvReq = 0x47, regData0 = 0x50, regData1 = 0x51,
+    statusEoc = 1u << 0, statusConvFault = 1u << 7, enAdc = 1u << 7, convRequest = 1u << 7,
+    channelGnd = 0x00, channelRef = 0x01, channelVbat = 0x84,
+};
+
+enum : unsigned {
+    ppidVadc = 0x231,          // PM7250B (USID 2), page 0x31: a page number, not a slot
+    apidSlots = 512, mapOffset = 0x900, ownerOffset = 0x700, apidStride = 0x80,
+};
+
+enum : int { apidAbsent = -1, apidAmbiguous = -2 };
+
+bool mappingNames(uint32_t mapping) { return mapping != 0 && ((mapping >> 8) & 0xfff) == ppidVadc; }
+bool ownerIsApps(uint32_t owner) { return (owner & 7) == 0; }
 
 struct VadcMap {
     IOMemoryMap *map = nullptr;
@@ -123,7 +139,6 @@ struct VadcMap {
 
 // One conversion, in the ADC5 order: parameters, enable, channel, request.
 bool convertChannel(volatile uint32_t *window, uint8_t channel, unsigned &code) {
-    using namespace picasso_battery::core;
     if (picasso_spmi_write8(window, regDigParam, 0)) return false;
     if (picasso_spmi_write8(window, regEnCtl1, enAdc)) return false;
     if (picasso_spmi_write8(window, regChannel, channel)) return false;
@@ -131,8 +146,8 @@ bool convertChannel(volatile uint32_t *window, uint8_t channel, unsigned &code) 
     for (unsigned poll = 0; poll < 20; ++poll) {
         uint8_t status = 0;
         if (picasso_spmi_read8(window, regStatus1, status)) return false;
-        if (status & picasso_battery::core::statusConvFault) return false;
-        if (status & picasso_battery::core::statusEoc) {
+        if (status & statusConvFault) return false;
+        if (status & statusEoc) {
             uint8_t lsb = 0, msb = 0;
             if (picasso_spmi_read8(window, regData0, lsb)) return false;
             if (picasso_spmi_read8(window, regData1, msb)) return false;
@@ -146,11 +161,9 @@ bool convertChannel(volatile uint32_t *window, uint8_t channel, unsigned &code) 
 
 // Two slots claiming the same page is a reason to stop: this path writes to the slot.
 int findVadcSlot(volatile uint32_t *core, volatile uint32_t *owners) {
-    using namespace picasso_battery::core;
     int found = apidAbsent;
     for (unsigned slot = 0; slot < apidSlots; ++slot) {
-        const uint32_t mapping = core[(mapOffset + slot * 4) / 4];
-        if (!mappingNames(mapping, ppidVadc)) continue;
+        if (!mappingNames(core[(mapOffset + slot * 4) / 4])) continue;
         if (!ownerIsApps(owners[(ownerOffset + slot * 4) / 4])) continue;
         if (found != apidAbsent) return apidAmbiguous;
         found = int(slot);
@@ -158,8 +171,37 @@ int findVadcSlot(volatile uint32_t *core, volatile uint32_t *owners) {
     return found;
 }
 
+// Two-point calibration from the converter's own references, then undo the 1/3 divider.
+bool millivolts(unsigned code, unsigned gnd, unsigned reference, unsigned &out) {
+    if (reference <= gnd || reference - gnd < 2000 || code <= gnd) return false;
+    const uint64_t microvolts = uint64_t(code - gnd) * 1250000ull * 3ull / (reference - gnd);
+    const unsigned value = unsigned(microvolts / 1000);
+    if (value < 3000 || value > 4600) return false;
+    out = value;
+    return true;
+}
+
+// Coarse Li-ion curve. Fine-grained accuracy would only pretend; these are the points the
+// log can be checked against.
+int percentFor(unsigned mv) {
+    static const struct { unsigned millivolts; int percent; } curve[] = {
+        {4300, 100}, {4200, 95}, {4100, 88}, {4000, 78}, {3900, 65}, {3800, 52},
+        {3750, 45}, {3700, 38}, {3650, 30}, {3600, 22}, {3550, 15}, {3500, 10},
+        {3450, 6}, {3400, 3}, {3300, 1}, {3200, 0},
+    };
+    const unsigned last = unsigned(sizeof(curve) / sizeof(curve[0])) - 1;
+    if (mv >= curve[0].millivolts) return 100;
+    if (mv <= curve[last].millivolts) return 0;
+    for (unsigned i = 1; i <= last; ++i) {
+        if (mv < curve[i].millivolts) continue;
+        const unsigned high = curve[i - 1].millivolts, low = curve[i].millivolts;
+        const int highPercent = curve[i - 1].percent, lowPercent = curve[i].percent;
+        return lowPercent + int((mv - low) * unsigned(highPercent - lowPercent) / (high - low));
+    }
+    return 0;
+}
+
 bool readPackMillivolts(unsigned &millivoltsOut) {
-    using namespace picasso_battery::core;
     const char *why = "?";
     unsigned gnd = 0, reference = 0, raw = 0;
     int slot = apidAbsent;
@@ -173,14 +215,13 @@ bool readPackMillivolts(unsigned &millivoltsOut) {
         if (!convertChannel(block.va, channelGnd, gnd)) { why = "gnd"; break; }
         if (!convertChannel(block.va, channelRef, reference)) { why = "ref"; break; }
         if (!convertChannel(block.va, channelVbat, raw)) { why = "vbat"; break; }
-        Scale scale;
-        if (!scaleFrom(gnd, reference, scale)) { why = "calibration"; break; }
-        if (!millivolts(raw, scale, millivoltsOut)) { why = "range"; break; }
+        if (!millivolts(raw, gnd, reference, millivoltsOut)) { why = "calibration"; break; }
         IOLog("PICASSO_BATT slot=%d gnd=%u ref=%u vbat=%u mv=%u pct=%d\n",
             slot, gnd, reference, raw, millivoltsOut, percentFor(millivoltsOut));
         return true;
     } while (false);
-    IOLog("PICASSO_BATT refused reason=%s slot=%d gnd=%u ref=%u vbat=%u\n", why, slot, gnd, reference, raw);
+    IOLog("PICASSO_BATT refused reason=%s slot=%d gnd=%u ref=%u vbat=%u\n",
+        why, slot, gnd, reference, raw);
     return false;
 }
 
@@ -196,14 +237,14 @@ void PicassoPowerSource::publishFixedState() {
     // "Fully charged" is only honest when the measurement says so; with no reading we
     // keep the previous fixed state rather than invent one.
     const OSSymbol *full = OSSymbol::withCString("FullyCharged");
-    if (full && (!measured || picasso_battery::core::percentFor(packMillivolts) >= 100))
+    if (full && (!measured || percentFor(packMillivolts) >= 100))
         setPSProperty(full, kOSBooleanTrue);
     OSSafeReleaseNULL(full);
-    setCurrentCapacity(measured ? picasso_battery::core::percentFor(packMillivolts) : 100);
+    setCurrentCapacity(measured ? percentFor(packMillivolts) : 100);
     setMaxCapacity(100);
     setVoltage(measured ? packMillivolts : 4400);
     setAmperage(0);
-    number("AppleRawCurrentCapacity", measured ? picasso_battery::core::percentFor(packMillivolts) : 4500);
+    number("AppleRawCurrentCapacity", measured ? percentFor(packMillivolts) : 4500);
     number("AppleRawMaxCapacity", 4500);
     number("DesignCapacity", 4500);
     OSDictionary *adapter = OSDictionary::withCapacity(4);
