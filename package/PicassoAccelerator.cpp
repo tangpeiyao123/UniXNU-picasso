@@ -99,15 +99,21 @@ void PicassoPowerSource::number(const char *key, unsigned long long value) {
 }
 
 // ---- battery -------------------------------------------------------------------
-// PM7250B's VADC through the SPMI arbiter. Read-mostly and bounded: any unexpected state
-// returns false, one PICASSO_BATT line says why, and the caller keeps the fixed values it
-// already published. The slot comes from the arbiter's own mapping table (never computed
-// from the PPID), and the two on-chip references (0 V, 1.25 V) are the calibration, so no
-// data-sheet constant is involved. Self-contained on purpose: this file is compiled from
-// kits/picasso, where a newly added header would not be present.
+// PM7250B's VADC through the SPMI arbiter. Two rules carried over from the standalone driver,
+// because both were learned the hard way:
+//   1. The two windows are NOT interchangeable. PicassoBacklight.cpp maps the observer window
+//      (0xe600000 + slot*0x80) for reads and the writer window (0xc600000 + slot*0x10000) for
+//      writes. Writing through the observer window reaches nothing, so the conversion would
+//      never complete.
+//   2. Nothing is written before the slot has been shown to answer and to be the page we asked
+//      for. The slot comes from the arbiter's own mapping table (never computed from the PPID),
+//      and a duplicate match is refused rather than resolved.
+// If any step disagrees with expectations the fixed properties stay and one PICASSO_BATT line
+// says which step refused.
 namespace {
 
 enum : uint8_t {
+    regPerphType = 0x04, regPerphSubtype = 0x05,
     regStatus1 = 0x08, regDigParam = 0x42, regChannel = 0x44, regEnCtl1 = 0x46,
     regConvReq = 0x47, regData0 = 0x50, regData1 = 0x51,
     statusEoc = 1u << 0, statusConvFault = 1u << 7, enAdc = 1u << 7, convRequest = 1u << 7,
@@ -115,13 +121,16 @@ enum : uint8_t {
 };
 
 enum : unsigned {
-    ppidVadc = 0x231,          // PM7250B (USID 2), page 0x31: a page number, not a slot
+    ppidVadc = 0x231,           // PM7250B (USID 2), page 0x31: a page number, not a slot
+    ppidSamePageUsid0 = 0x031,  // PM8150's page of the same number: logged, never used
     apidSlots = 512, mapOffset = 0x900, ownerOffset = 0x700, apidStride = 0x80,
 };
 
 enum : int { apidAbsent = -1, apidAmbiguous = -2 };
 
-bool mappingNames(uint32_t mapping) { return mapping != 0 && ((mapping >> 8) & 0xfff) == ppidVadc; }
+bool mappingNames(uint32_t mapping, unsigned ppid) {
+    return mapping != 0 && ((mapping >> 8) & 0xfff) == ppid;
+}
 bool ownerIsApps(uint32_t owner) { return (owner & 7) == 0; }
 
 struct VadcMap {
@@ -137,38 +146,71 @@ struct VadcMap {
     ~VadcMap() { OSSafeReleaseNULL(map); }
 };
 
-// One conversion, in the ADC5 order: parameters, enable, channel, request.
-bool convertChannel(volatile uint32_t *window, uint8_t channel, unsigned &code) {
-    if (picasso_spmi_write8(window, regDigParam, 0)) return false;
-    if (picasso_spmi_write8(window, regEnCtl1, enAdc)) return false;
-    if (picasso_spmi_write8(window, regChannel, channel)) return false;
-    if (picasso_spmi_write8(window, regConvReq, convRequest)) return false;
+struct VadcWindows {
+    VadcMap observer, writer;
+    bool open(unsigned slot) {
+        return observer.open(0xe600000ull + uint64_t(slot) * apidStride, apidStride) &&
+               writer.open(0xc600000ull + uint64_t(slot) * 0x10000, 0x1000);
+    }
+};
+
+int findSlot(volatile uint32_t *core, volatile uint32_t *owners, unsigned ppid) {
+    int found = apidAbsent;
+    for (unsigned slot = 0; slot < apidSlots; ++slot) {
+        if (!mappingNames(core[(mapOffset + slot * 4) / 4], ppid)) continue;
+        if (!ownerIsApps(owners[(ownerOffset + slot * 4) / 4])) continue;
+        if (found != apidAbsent) return apidAmbiguous;
+        found = int(slot);
+    }
+    return found;
+}
+
+// Read-only. Says which slot each page resolved to and whether it answers; two converters share
+// this page number (PM8150 at USID 0, PM7250B at USID 2), so the log has to show both.
+void describePage(volatile uint32_t *core, volatile uint32_t *owners, unsigned ppid, const char *label) {
+    const int slot = findSlot(core, owners, ppid);
+    if (slot < 0) {
+        IOLog("PICASSO_BATT page %s ppid=%#x slot=%s\n", label, ppid,
+            slot == apidAmbiguous ? "ambiguous" : "absent");
+        return;
+    }
+    VadcMap observer;
+    if (!observer.open(0xe600000ull + uint64_t(slot) * apidStride, apidStride)) {
+        IOLog("PICASSO_BATT page %s ppid=%#x slot=%d window=failed\n", label, ppid, slot);
+        return;
+    }
+    uint8_t type = 0, subtype = 0;
+    const int typeError = picasso_spmi_read8(observer.va, regPerphType, type);
+    const int subtypeError = picasso_spmi_read8(observer.va, regPerphSubtype, subtype);
+    IOLog("PICASSO_BATT page %s ppid=%#x slot=%d type=%02x/%d subtype=%02x/%d\n",
+        label, ppid, slot, type, typeError, subtype, subtypeError);
+}
+
+// One conversion. The first read happens before any write: a slot that answers 0xff is not
+// there, and writing to it would be a guess about someone else's peripheral.
+bool convertChannel(VadcWindows &bus, uint8_t channel, unsigned &code) {
+    uint8_t status = 0;
+    if (picasso_spmi_read8(bus.observer.va, regStatus1, status)) return false;
+    if (status == 0xff) return false;
+    if (picasso_spmi_write8(bus.writer.va, regDigParam, 0)) return false;
+    if (picasso_spmi_write8(bus.writer.va, regChannel, channel)) return false;
+    if (picasso_spmi_write8(bus.writer.va, regEnCtl1, enAdc)) return false;
+    if (picasso_spmi_write8(bus.writer.va, regConvReq, convRequest)) return false;
     for (unsigned poll = 0; poll < 20; ++poll) {
-        uint8_t status = 0;
-        if (picasso_spmi_read8(window, regStatus1, status)) return false;
+        // The second read, after the enable: catches a dead slot and a converter that faults.
+        if (picasso_spmi_read8(bus.observer.va, regStatus1, status)) return false;
+        if (status == 0xff) return false;
         if (status & statusConvFault) return false;
         if (status & statusEoc) {
             uint8_t lsb = 0, msb = 0;
-            if (picasso_spmi_read8(window, regData0, lsb)) return false;
-            if (picasso_spmi_read8(window, regData1, msb)) return false;
+            if (picasso_spmi_read8(bus.observer.va, regData0, lsb)) return false;
+            if (picasso_spmi_read8(bus.observer.va, regData1, msb)) return false;
             code = (unsigned(msb) << 8) | lsb;
             return true;
         }
         IODelay(100);
     }
     return false;
-}
-
-// Two slots claiming the same page is a reason to stop: this path writes to the slot.
-int findVadcSlot(volatile uint32_t *core, volatile uint32_t *owners) {
-    int found = apidAbsent;
-    for (unsigned slot = 0; slot < apidSlots; ++slot) {
-        if (!mappingNames(core[(mapOffset + slot * 4) / 4])) continue;
-        if (!ownerIsApps(owners[(ownerOffset + slot * 4) / 4])) continue;
-        if (found != apidAbsent) return apidAmbiguous;
-        found = int(slot);
-    }
-    return found;
 }
 
 // Two-point calibration from the converter's own references, then undo the 1/3 divider.
@@ -181,8 +223,7 @@ bool millivolts(unsigned code, unsigned gnd, unsigned reference, unsigned &out) 
     return true;
 }
 
-// Coarse Li-ion curve. Fine-grained accuracy would only pretend; these are the points the
-// log can be checked against.
+// Coarse Li-ion curve: the points this log can be checked against.
 int percentFor(unsigned mv) {
     static const struct { unsigned millivolts; int percent; } curve[] = {
         {4300, 100}, {4200, 95}, {4100, 88}, {4000, 78}, {3900, 65}, {3800, 52},
@@ -207,14 +248,17 @@ bool readPackMillivolts(unsigned &millivoltsOut) {
     int slot = apidAbsent;
     do {
         if (!picasso_spmi_init()) { why = "spmi"; break; }
-        VadcMap core, owners, block;
+        VadcMap core, owners;
         if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) { why = "arbiter"; break; }
-        slot = findVadcSlot(core.va, owners.va);
+        describePage(core.va, owners.va, ppidVadc, "usid2");
+        describePage(core.va, owners.va, ppidSamePageUsid0, "usid0");
+        slot = findSlot(core.va, owners.va, ppidVadc);
         if (slot < 0) { why = slot == apidAmbiguous ? "ambiguous" : "absent"; break; }
-        if (!block.open(0xe600000ull + uint64_t(slot) * apidStride, apidStride)) { why = "window"; break; }
-        if (!convertChannel(block.va, channelGnd, gnd)) { why = "gnd"; break; }
-        if (!convertChannel(block.va, channelRef, reference)) { why = "ref"; break; }
-        if (!convertChannel(block.va, channelVbat, raw)) { why = "vbat"; break; }
+        VadcWindows bus;
+        if (!bus.open(unsigned(slot))) { why = "windows"; break; }
+        if (!convertChannel(bus, channelGnd, gnd)) { why = "gnd"; break; }
+        if (!convertChannel(bus, channelRef, reference)) { why = "ref"; break; }
+        if (!convertChannel(bus, channelVbat, raw)) { why = "vbat"; break; }
         if (!millivolts(raw, gnd, reference, millivoltsOut)) { why = "calibration"; break; }
         IOLog("PICASSO_BATT slot=%d gnd=%u ref=%u vbat=%u mv=%u pct=%d\n",
             slot, gnd, reference, raw, millivoltsOut, percentFor(millivoltsOut));
@@ -234,12 +278,13 @@ void PicassoPowerSource::publishFixedState() {
     setExternalConnected(true);
     setExternalChargeCapable(true);
     setIsCharging(false);
-    // "Fully charged" is only honest when the measurement says so; with no reading we
-    // keep the previous fixed state rather than invent one.
-    const OSSymbol *full = OSSymbol::withCString("FullyCharged");
-    if (full && (!measured || percentFor(packMillivolts) >= 100))
-        setPSProperty(full, kOSBooleanTrue);
-    OSSafeReleaseNULL(full);
+    // "Fully charged" is only honest when a reading says so. A failed read must not set it:
+    // the previous behaviour (always true) is exactly the bug this replaced.
+    if (measured && percentFor(packMillivolts) >= 100) {
+        const OSSymbol *full = OSSymbol::withCString("FullyCharged");
+        if (full) setPSProperty(full, kOSBooleanTrue);
+        OSSafeReleaseNULL(full);
+    }
     setCurrentCapacity(measured ? percentFor(packMillivolts) : 100);
     setMaxCapacity(100);
     setVoltage(measured ? packMillivolts : 4400);
