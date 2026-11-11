@@ -89,6 +89,9 @@ class PicassoPowerSource : public IOPMPowerSource {
     IOTimerEventSource *timer = nullptr;
     unsigned lastChargerStatus = 0xffffffffu;   // 0xffffffff = nothing read yet
     unsigned pollsSinceFull = 0;
+    unsigned lastGoodMillivolts = 0;            // last successfully converted pack voltage
+    int lastGoodPercent = 100;
+    bool haveReading = false;
 public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
@@ -140,6 +143,13 @@ enum : unsigned {
 };
 
 enum : int { apidAbsent = -1, apidAmbiguous = -2 };
+
+// Slots resolved from the arbiter's mapping table never move while the system is up, so they are
+// cached after the first success: the 512-slot scan and the two describePage() probes used to run
+// on every single refresh, which put a pointless burst of arbiter reads on the work loop.
+int cachedVadcSlot = apidAbsent;
+int cachedChgrSlot = apidAbsent;
+bool pagesDescribed = false;
 
 bool mappingNames(uint32_t mapping, unsigned ppid) {
     return mapping != 0 && ((mapping >> 8) & 0xfff) == ppid;
@@ -270,9 +280,13 @@ bool readPackMillivolts(unsigned &millivoltsOut) {
         if (!picasso_spmi_init()) { why = "spmi"; break; }
         VadcMap core, owners;
         if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) { why = "arbiter"; break; }
-        describePage(core.va, owners.va, ppidVadc, "usid2");
-        describePage(core.va, owners.va, ppidSamePageUsid0, "usid0");
-        slot = findSlot(core.va, owners.va, ppidVadc);
+        if (!pagesDescribed) {
+            pagesDescribed = true;
+            describePage(core.va, owners.va, ppidVadc, "usid2");
+            describePage(core.va, owners.va, ppidSamePageUsid0, "usid0");
+        }
+        if (cachedVadcSlot == apidAbsent) cachedVadcSlot = findSlot(core.va, owners.va, ppidVadc);
+        slot = cachedVadcSlot;
         if (slot < 0) { why = slot == apidAmbiguous ? "ambiguous" : "absent"; break; }
         VadcWindows bus;
         if (!bus.open(unsigned(slot))) { why = "windows"; break; }
@@ -298,7 +312,8 @@ bool readUsbState(unsigned &usbMillivolts, unsigned &senseCode) {
     if (!picasso_spmi_init()) return false;
     VadcMap core, owners;
     if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) return false;
-    const int slot = findSlot(core.va, owners.va, ppidVadc);
+    if (cachedVadcSlot == apidAbsent) cachedVadcSlot = findSlot(core.va, owners.va, ppidVadc);
+    const int slot = cachedVadcSlot;
     if (slot < 0) return false;
     VadcWindows bus;
     if (!bus.open(unsigned(slot))) return false;
@@ -322,7 +337,17 @@ bool readChargerStatus(unsigned &statusOut) {
     if (!picasso_spmi_init()) return false;
     VadcMap core, owners;
     if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) return false;
-    const int slot = findSlot(core.va, owners.va, ppidChgr);
+    if (cachedChgrSlot == apidAbsent) {
+        cachedChgrSlot = findSlot(core.va, owners.va, ppidChgr);
+        if (cachedChgrSlot >= 0) {
+            IOLog("PICASSO_BATT chgr slot=%d (page 0x10, SMB5 BATTERY_CHARGER_STATUS_1 @0x06)\n",
+                cachedChgrSlot);
+        } else {
+            IOLog("PICASSO_BATT chgr slot=%s ppid=%#x\n",
+                cachedChgrSlot == apidAmbiguous ? "ambiguous" : "absent", ppidChgr);
+        }
+    }
+    const int slot = cachedChgrSlot;
     if (slot < 0) return false;
     VadcMap observer;
     if (!observer.open(0xe600000ull + uint64_t(slot) * apidStride, apidStride)) return false;
@@ -340,6 +365,15 @@ void PicassoPowerSource::refreshState() {
     const bool usb = readUsbState(usbMillivolts, senseCode);
     const bool powered = usb && usbMillivolts >= 3000;   // VBUS rail present
     const bool full = measured && percentFor(packMillivolts) >= 100;
+    // A failed conversion must not invent a state: before this, one bad read published 100 %/4400 mV
+    // and yanked the UI to a full battery. Keep the last good reading instead.
+    if (measured) {
+        lastGoodMillivolts = packMillivolts;
+        lastGoodPercent = percentFor(packMillivolts);
+        haveReading = true;
+    }
+    const unsigned shownMillivolts = measured ? packMillivolts : (haveReading ? lastGoodMillivolts : 4400);
+    const int shownPercent = measured ? percentFor(packMillivolts) : (haveReading ? lastGoodPercent : 100);
     // True charge state from SMB5's hardware state machine (BATTERY_CHARGER_STATUS_1, low 3 bits).
     // 1..4 (TRICKLE/PRE/FULLON/TAPER) mean the battery is charging; SMB5 decides on its own whether
     // the input (SDP/CDP/DCP) can charge, so no VBUS approximation is needed.
@@ -361,11 +395,11 @@ void PicassoPowerSource::refreshState() {
         OSSafeReleaseNULL(fullKey);
     }
 
-    setCurrentCapacity(measured ? percentFor(packMillivolts) : 100);
+    setCurrentCapacity(shownPercent);
     setMaxCapacity(100);
-    setVoltage(measured ? packMillivolts : 4400);
+    setVoltage(shownMillivolts);
     setAmperage(0);   // current sense resistor not calibrated yet
-    number("AppleRawCurrentCapacity", measured ? 4500ull * unsigned(percentFor(packMillivolts)) / 100 : 4500);
+    number("AppleRawCurrentCapacity", 4500ull * unsigned(shownPercent) / 100);
     number("AppleRawMaxCapacity", 4500);
     number("DesignCapacity", 4500);
 
@@ -381,8 +415,10 @@ void PicassoPowerSource::refreshState() {
     }
     OSSafeReleaseNULL(watts); OSSafeReleaseNULL(family); OSSafeReleaseNULL(adapter);
 
-    IOLog("PICASSO_BATT state mv=%u pct=%d usb=%umV powered=%d charging=%d chg_status=%u sense_code=%u\n",
-        measured ? packMillivolts : 0, measured ? percentFor(packMillivolts) : -1,
+    // ok= says whether this round actually re-read the pack; shown mv/pct are what got published
+    // (last good reading when ok=0), so the log can never be read as "the UI jumped".
+    IOLog("PICASSO_BATT state ok=%d mv=%u pct=%d usb=%umV powered=%d charging=%d chg_status=%u sense_code=%u\n",
+        measured ? 1 : 0, shownMillivolts, shownPercent,
         usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0,
         hasCharger ? chargerStatus : 8u, senseCode);
     updateStatus();
