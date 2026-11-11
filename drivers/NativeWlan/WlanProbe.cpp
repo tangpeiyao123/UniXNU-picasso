@@ -312,9 +312,11 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 // weak_import and link whether or not this driver is included.
 extern "C" void native_wlan_probe(void) {
     static bool surveyed;
-    // NOTE: msaSurvey() reads the no-map pil_wlan_fw_region@0x8ba00000. Mapping a no-map
-    // reserved region was observed to destabilise the boot (UFS data mount stall + GPU fence
-    // stuck at 19), so it is disabled until it can be done through a safe mapping path.
+    // NOTE: msaSurvey() reads the no-map pil_wlan_fw_region@0x8ba00000. Mapping a no-map reserved
+    // region is *suspected* to disturb the boot, but that is an unverified hypothesis: the build
+    // that did call it went on to boot to the desktop and ran with GPU submissions climbing, and no
+    // single-variable A/B (msa on/off, same commit otherwise) has been run yet. Do not treat this
+    // disable as a diagnosis; re-enable behind a boot-arg when the A/B can be done properly.
     if (!surveyed) { surveyed=true; smemSurvey(); }
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
