@@ -285,11 +285,11 @@ bool readPackMillivolts(unsigned &millivoltsOut) {
     return false;
 }
 
-// USB presence and charge state. usb_in_v_div_16 reads the VBUS rail divided by 16, so a
-// calibrated value well above 3 V means the port is powered. usb_in_i_uv is the current-sense
-// voltage (1:1, µV); it is read for the log only — its sign/scale against the sense resistor
-// is not yet confirmed, so amperage stays 0 until that is calibrated.
-bool readUsbState(unsigned &usbMillivolts, unsigned &senseUv) {
+// USB presence. usb_in_v_div_16 reads the VBUS rail divided by 16, so a calibrated value well
+// above 3 V means the port is powered. usb_in_i_uv is the current-sense channel (1:1); its raw
+// ADC code is returned for the log only — the sign/scale against the sense resistor is not yet
+// decoded, so amperage stays 0 and isCharging stays false until SMB5 chgr@1000 is decoded.
+bool readUsbState(unsigned &usbMillivolts, unsigned &senseCode) {
     unsigned gnd = 0, reference = 0, usbV = 0, usbI = 0;
     if (!picasso_spmi_init()) return false;
     VadcMap core, owners;
@@ -305,19 +305,22 @@ bool readUsbState(unsigned &usbMillivolts, unsigned &senseUv) {
     uint64_t microvolts = 0;
     if (!scaledMicrovolts(usbV, gnd, reference, 16, microvolts)) return false;
     usbMillivolts = unsigned(microvolts / 1000);
-    senseUv = usbI;
+    senseCode = usbI;
     return true;
 }
 
 }  // namespace
 
 void PicassoPowerSource::refreshState() {
-    unsigned packMillivolts = 0, usbMillivolts = 0, senseUv = 0;
+    unsigned packMillivolts = 0, usbMillivolts = 0, senseCode = 0;
     const bool measured = readPackMillivolts(packMillivolts);
-    const bool usb = readUsbState(usbMillivolts, senseUv);
+    const bool usb = readUsbState(usbMillivolts, senseCode);
     const bool powered = usb && usbMillivolts >= 3000;   // VBUS rail present
     const bool full = measured && percentFor(packMillivolts) >= 100;
-    const bool charging = powered && measured && !full;
+    // isCharging stays false until SMB5 chgr@1000 charge-status is decoded: VBUS alone cannot
+    // tell a data cable from charging, and this board is always USB-connected, so "powered &&
+    // !full" would be permanently true and report a charge that may not be happening.
+    const bool charging = false;
 
     setBatteryInstalled(true);
     setExternalConnected(powered);
@@ -337,7 +340,7 @@ void PicassoPowerSource::refreshState() {
     setMaxCapacity(100);
     setVoltage(measured ? packMillivolts : 4400);
     setAmperage(0);   // current sense resistor not calibrated yet
-    number("AppleRawCurrentCapacity", measured ? percentFor(packMillivolts) : 4500);
+    number("AppleRawCurrentCapacity", measured ? 4500ull * unsigned(percentFor(packMillivolts)) / 100 : 4500);
     number("AppleRawMaxCapacity", 4500);
     number("DesignCapacity", 4500);
 
@@ -353,14 +356,39 @@ void PicassoPowerSource::refreshState() {
     }
     OSSafeReleaseNULL(watts); OSSafeReleaseNULL(family); OSSafeReleaseNULL(adapter);
 
-    IOLog("PICASSO_BATT state mv=%u pct=%d usb=%umV powered=%d charging=%d sense_uv=%u\n",
+    IOLog("PICASSO_BATT state mv=%u pct=%d usb=%umV powered=%d charging=%d sense_code=%u\n",
         measured ? packMillivolts : 0, measured ? percentFor(packMillivolts) : -1,
-        usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0, senseUv);
+        usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0, senseCode);
     updateStatus();
 }
 
 void PicassoPowerSource::publishFixedState() {
-    refreshState();
+    // Boot-path bootstrap only: fixed fallbacks, no VADC reads here. Seven conversions on the
+    // service-publish critical path would stall early boot. The first real read happens on the
+    // timer shortly after start().
+    setBatteryInstalled(true);
+    setExternalConnected(true);   // fallback: this board is normally USB-powered
+    setExternalChargeCapable(true);
+    setIsCharging(false);
+    setCurrentCapacity(100);
+    setMaxCapacity(100);
+    setVoltage(4400);
+    setAmperage(0);
+    number("AppleRawCurrentCapacity", 4500);
+    number("AppleRawMaxCapacity", 4500);
+    number("DesignCapacity", 4500);
+    OSDictionary *adapter = OSDictionary::withCapacity(4);
+    OSNumber *watts = OSNumber::withNumber(18ULL, 32), *family = OSNumber::withNumber(0xe0004009ULL, 32);  // USB-C
+    if (adapter && watts && family) {
+        adapter->setObject(kIOPMPSAdapterDetailsWattsKey, watts);
+        adapter->setObject(kIOPMPSAdapterDetailsFamilyKey, family);
+        adapter->setObject("IsWireless", kOSBooleanFalse);
+        const OSSymbol *key = OSSymbol::withCString(kIOPMPSAdapterDetailsKey);
+        if (key) setPSProperty(key, adapter);
+        OSSafeReleaseNULL(key);
+    }
+    OSSafeReleaseNULL(watts); OSSafeReleaseNULL(family); OSSafeReleaseNULL(adapter);
+    updateStatus();
 }
 
 bool PicassoPowerSource::start(IOService *provider) {
@@ -374,10 +402,10 @@ bool PicassoPowerSource::start(IOService *provider) {
         OSSafeReleaseNULL(workLoop);
         return false;
     }
-    // Low-frequency refresh so the charge percentage follows the pack instead of staying at
-    // the boot-time snapshot. SPMI reads are safe here: init is idempotent and read/write take
-    // the controller IRQ lock only for the register access.
-    timer->setTimeoutMS(30000);
+    // First real read ~1s after boot (publishFixedState only set fallbacks to keep the early
+    // boot path light); refreshTimer then re-arms to 30s. SPMI reads are safe here: init is
+    // idempotent and read/write take the controller IRQ lock only for the register access.
+    timer->setTimeoutMS(1000);
     return true;
 }
 
@@ -391,9 +419,9 @@ void PicassoPowerSource::stop(IOService *provider) {
     IOPMPowerSource::stop(provider);
 }
 
-void PicassoPowerSource::refreshTimer(OSObject *, IOTimerEventSource *) {
+void PicassoPowerSource::refreshTimer(OSObject *, IOTimerEventSource *sender) {
     refreshState();
-    if (timer) timer->setTimeoutMS(30000);   // re-arm
+    if (sender) sender->setTimeoutMS(30000);   // re-arm via the parameter, not the member
 }
 
 extern "C" bool picasso_power_source_publish(void) {
