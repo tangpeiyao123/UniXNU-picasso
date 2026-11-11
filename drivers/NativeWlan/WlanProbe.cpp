@@ -312,7 +312,10 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 // weak_import and link whether or not this driver is included.
 extern "C" void native_wlan_probe(void) {
     static bool surveyed;
-    if (!surveyed) { surveyed=true; smemSurvey(); msaSurvey(); }
+    // NOTE: msaSurvey() reads the no-map pil_wlan_fw_region@0x8ba00000. Mapping a no-map
+    // reserved region was observed to destabilise the boot (UFS data mount stall + GPU fence
+    // stuck at 19), so it is disabled until it can be done through a safe mapping path.
+    if (!surveyed) { surveyed=true; smemSurvey(); }
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
     if (native_wlan_stage_req) return;
