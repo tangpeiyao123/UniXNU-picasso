@@ -86,6 +86,8 @@ class PicassoPowerSource : public IOPMPowerSource {
     OSDeclareDefaultStructors(PicassoPowerSource);
     IOWorkLoop *workLoop = nullptr;
     IOTimerEventSource *timer = nullptr;
+    unsigned lastChargerStatus = 0xffffffffu;   // 0xffffffff = nothing read yet
+    unsigned pollsSinceFull = 0;
 public:
     bool start(IOService *provider) override;
     void stop(IOService *provider) override;
@@ -426,8 +428,9 @@ bool PicassoPowerSource::start(IOService *provider) {
         return false;
     }
     // First real read ~1s after boot (publishFixedState only set fallbacks to keep the early
-    // boot path light); refreshTimer then re-arms to 30s. SPMI reads are safe here: init is
-    // idempotent and read/write take the controller IRQ lock only for the register access.
+    // boot path light); refreshTimer then ticks every 2 s and re-reads the pack on any change.
+    // SPMI reads are safe here: init is idempotent and read/write take the controller IRQ lock
+    // only for the register access.
     timer->setTimeoutMS(1000);
     return true;
 }
@@ -443,8 +446,23 @@ void PicassoPowerSource::stop(IOService *provider) {
 }
 
 void PicassoPowerSource::refreshTimer(OSObject *, IOTimerEventSource *sender) {
-    refreshState();
-    if (sender) sender->setTimeoutMS(30000);   // re-arm via the parameter, not the member
+    // Cheap 2 s tick: one read of the charger status register (no VADC conversion). A plug/unplug or
+    // a charge-stage change re-reads the whole pack immediately, so the charge bolt follows the
+    // cable within a couple of seconds. A full sweep still happens every ~30 s so the percentage
+    // tracks discharge. Doing all 11 conversions every 2 s would put needless work on the work loop.
+    unsigned status = 0;
+    const bool haveStatus = readChargerStatus(status);
+    bool refresh = (lastChargerStatus == 0xffffffffu);
+    if (haveStatus) {
+        if (status != lastChargerStatus) refresh = true;
+        lastChargerStatus = status;
+    }
+    if (++pollsSinceFull >= 15) refresh = true;
+    if (refresh) {
+        pollsSinceFull = 0;
+        refreshState();
+    }
+    if (sender) sender->setTimeoutMS(2000);   // re-arm via the parameter, not the member
 }
 
 extern "C" bool picasso_power_source_publish(void) {
