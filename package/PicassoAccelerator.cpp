@@ -14,6 +14,8 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/pwr_mgt/IOPMPowerSource.h>
 #include <libkern/c++/OSBoolean.h>
@@ -82,9 +84,15 @@ extern "C" IOService *picasso_accelerator_allocate(void) {
 // gauge driver yet. Shape after HackiOS's HakiosBattery.
 class PicassoPowerSource : public IOPMPowerSource {
     OSDeclareDefaultStructors(PicassoPowerSource);
+    IOWorkLoop *workLoop = nullptr;
+    IOTimerEventSource *timer = nullptr;
 public:
+    bool start(IOService *provider) override;
+    void stop(IOService *provider) override;
     void publishFixedState();
 private:
+    void refreshState();
+    void refreshTimer(OSObject *, IOTimerEventSource *);
     void number(const char *key, unsigned long long value);
 };
 
@@ -118,6 +126,7 @@ enum : uint8_t {
     regConvReq = 0x47, regData0 = 0x50, regData1 = 0x51,
     statusEoc = 1u << 0, statusConvFault = 1u << 7, enAdc = 1u << 7, convRequest = 1u << 7,
     channelGnd = 0x00, channelRef = 0x01, channelVbat = 0x84,
+    channelUsbInI = 0x07, channelUsbInV = 0x08,   // PM7250B VADC: usb_in_i_uv@7, usb_in_v_div_16@8
 };
 
 enum : unsigned {
@@ -213,10 +222,17 @@ bool convertChannel(VadcWindows &bus, uint8_t channel, unsigned &code) {
     return false;
 }
 
-// Two-point calibration from the converter's own references, then undo the 1/3 divider.
-bool millivolts(unsigned code, unsigned gnd, unsigned reference, unsigned &out) {
+// Two-point calibration from the converter's own references, then undo the channel's
+// pre-scale divider: vbat_sns = 1/3, usb_in_v_div_16 = 1/16, usb_in_i_uv = 1/1.
+bool scaledMicrovolts(unsigned code, unsigned gnd, unsigned reference, unsigned scale, uint64_t &out) {
     if (reference <= gnd || reference - gnd < 2000 || code <= gnd) return false;
-    const uint64_t microvolts = uint64_t(code - gnd) * 1250000ull * 3ull / (reference - gnd);
+    out = uint64_t(code - gnd) * 1250000ull * scale / (reference - gnd);
+    return true;
+}
+
+bool millivolts(unsigned code, unsigned gnd, unsigned reference, unsigned &out) {
+    uint64_t microvolts = 0;
+    if (!scaledMicrovolts(code, gnd, reference, 3, microvolts)) return false;
     const unsigned value = unsigned(microvolts / 1000);
     if (value < 3000 || value > 4600) return false;
     out = value;
@@ -269,29 +285,62 @@ bool readPackMillivolts(unsigned &millivoltsOut) {
     return false;
 }
 
+// USB presence and charge state. usb_in_v_div_16 reads the VBUS rail divided by 16, so a
+// calibrated value well above 3 V means the port is powered. usb_in_i_uv is the current-sense
+// voltage (1:1, µV); it is read for the log only — its sign/scale against the sense resistor
+// is not yet confirmed, so amperage stays 0 until that is calibrated.
+bool readUsbState(unsigned &usbMillivolts, unsigned &senseUv) {
+    unsigned gnd = 0, reference = 0, usbV = 0, usbI = 0;
+    if (!picasso_spmi_init()) return false;
+    VadcMap core, owners;
+    if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) return false;
+    const int slot = findSlot(core.va, owners.va, ppidVadc);
+    if (slot < 0) return false;
+    VadcWindows bus;
+    if (!bus.open(unsigned(slot))) return false;
+    if (!convertChannel(bus, channelGnd, gnd)) return false;
+    if (!convertChannel(bus, channelRef, reference)) return false;
+    if (!convertChannel(bus, channelUsbInV, usbV)) return false;
+    if (!convertChannel(bus, channelUsbInI, usbI)) return false;
+    uint64_t microvolts = 0;
+    if (!scaledMicrovolts(usbV, gnd, reference, 16, microvolts)) return false;
+    usbMillivolts = unsigned(microvolts / 1000);
+    senseUv = usbI;
+    return true;
+}
+
 }  // namespace
 
-void PicassoPowerSource::publishFixedState() {
-    unsigned packMillivolts = 0;
+void PicassoPowerSource::refreshState() {
+    unsigned packMillivolts = 0, usbMillivolts = 0, senseUv = 0;
     const bool measured = readPackMillivolts(packMillivolts);
+    const bool usb = readUsbState(usbMillivolts, senseUv);
+    const bool powered = usb && usbMillivolts >= 3000;   // VBUS rail present
+    const bool full = measured && percentFor(packMillivolts) >= 100;
+    const bool charging = powered && measured && !full;
+
     setBatteryInstalled(true);
-    setExternalConnected(true);
-    setExternalChargeCapable(true);
-    setIsCharging(false);
-    // "Fully charged" is only honest when a reading says so. A failed read must not set it:
-    // the previous behaviour (always true) is exactly the bug this replaced.
-    if (measured && percentFor(packMillivolts) >= 100) {
-        const OSSymbol *full = OSSymbol::withCString("FullyCharged");
-        if (full) setPSProperty(full, kOSBooleanTrue);
-        OSSafeReleaseNULL(full);
+    setExternalConnected(powered);
+    setExternalChargeCapable(powered);
+    setIsCharging(charging);
+
+    // "Fully charged" only when a reading actually says so; clear it otherwise so the
+    // UI drops back out of the "full" state once the pack discharges below the top.
+    const OSSymbol *fullKey = OSSymbol::withCString("FullyCharged");
+    if (fullKey) {
+        if (full) setPSProperty(fullKey, kOSBooleanTrue);
+        else setPSProperty(fullKey, kOSBooleanFalse);
+        OSSafeReleaseNULL(fullKey);
     }
+
     setCurrentCapacity(measured ? percentFor(packMillivolts) : 100);
     setMaxCapacity(100);
     setVoltage(measured ? packMillivolts : 4400);
-    setAmperage(0);
+    setAmperage(0);   // current sense resistor not calibrated yet
     number("AppleRawCurrentCapacity", measured ? percentFor(packMillivolts) : 4500);
     number("AppleRawMaxCapacity", 4500);
     number("DesignCapacity", 4500);
+
     OSDictionary *adapter = OSDictionary::withCapacity(4);
     OSNumber *watts = OSNumber::withNumber(18ULL, 32), *family = OSNumber::withNumber(0xe0004009ULL, 32);  // USB-C
     if (adapter && watts && family) {
@@ -303,7 +352,48 @@ void PicassoPowerSource::publishFixedState() {
         OSSafeReleaseNULL(key);
     }
     OSSafeReleaseNULL(watts); OSSafeReleaseNULL(family); OSSafeReleaseNULL(adapter);
+
+    IOLog("PICASSO_BATT state mv=%u pct=%d usb=%umV powered=%d charging=%d sense_uv=%u\n",
+        measured ? packMillivolts : 0, measured ? percentFor(packMillivolts) : -1,
+        usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0, senseUv);
     updateStatus();
+}
+
+void PicassoPowerSource::publishFixedState() {
+    refreshState();
+}
+
+bool PicassoPowerSource::start(IOService *provider) {
+    if (!IOPMPowerSource::start(provider)) return false;
+    workLoop = IOWorkLoop::workLoop();
+    if (!workLoop) return false;
+    timer = IOTimerEventSource::timerEventSource(this,
+        OSMemberFunctionCast(IOTimerEventSource::Action, this, &PicassoPowerSource::refreshTimer));
+    if (!timer || workLoop->addEventSource(timer) != kIOReturnSuccess) {
+        OSSafeReleaseNULL(timer);
+        OSSafeReleaseNULL(workLoop);
+        return false;
+    }
+    // Low-frequency refresh so the charge percentage follows the pack instead of staying at
+    // the boot-time snapshot. SPMI reads are safe here: init is idempotent and read/write take
+    // the controller IRQ lock only for the register access.
+    timer->setTimeoutMS(30000);
+    return true;
+}
+
+void PicassoPowerSource::stop(IOService *provider) {
+    if (timer) {
+        timer->cancelTimeout();
+        if (workLoop) workLoop->removeEventSource(timer);
+        OSSafeReleaseNULL(timer);
+    }
+    OSSafeReleaseNULL(workLoop);
+    IOPMPowerSource::stop(provider);
+}
+
+void PicassoPowerSource::refreshTimer(OSObject *, IOTimerEventSource *) {
+    refreshState();
+    if (timer) timer->setTimeoutMS(30000);   // re-arm
 }
 
 extern "C" bool picasso_power_source_publish(void) {
