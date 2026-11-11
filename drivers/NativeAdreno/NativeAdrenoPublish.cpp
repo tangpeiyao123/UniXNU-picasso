@@ -22,7 +22,6 @@
 #include <kern/thread.h>
 #include "NativeAdrenoUserClient.h"
 #include "NativeAdrenoGpuContext.h"
-#include "NativeAdrenoProfile.h"
 
 extern "C" void proc_selfname(char *, int);
 extern "C" volatile uint32_t native_adreno_table_switches[8];
@@ -385,8 +384,6 @@ static void nativeAdrenoHangcheck(void *,wait_result_t)
             printed_fence=f;
         }
         IOLockUnlock(g.lock);
-        static unsigned profile_polls;
-        if(native_adreno_profile_enabled && ++profile_polls>=20) {profile_polls=0;native_adreno_profile_report();}
     }
 }
 
@@ -778,7 +775,6 @@ struct SubmitProbe {
 static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const void *input,size_t input_size,void *output,size_t output_size,uint64_t *lockWait)
 {
     SubmitProbe submit_probe(method==NativeAdrenoMethodSubmit);
-    NativeAdrenoProfileTimer prof_call(NativeProfileCall,method==NativeAdrenoMethodSubmit);
     if(method==NativeAdrenoMethodSetMetadata && input && input_size==sizeof(NativeAdrenoAbiMetadata)) {
         const NativeAdrenoAbiMetadata *meta=static_cast<const NativeAdrenoAbiMetadata *>(input);
         /* The raw test's line and the Turnip phase's line ("T ..." result or "W ..." watchdog sample) are kept apart, so neither hides the other. */
@@ -877,15 +873,12 @@ static IOReturn runCore(AGXDeviceUserClient *connection,uint32_t method,const vo
         /* i e38a0b1eb: a BoFree held the lock up to 38 ms, unwiring and freeing a large BO's pages; they now go after the lock. */
         NativeAdrenoSystemPages freed{};
         const bool freeing=method==NativeAdrenoMethodBoFree;
-        const uint64_t profile_lock=method==NativeAdrenoMethodSubmit?nativeAdrenoProfileNow():0;
         lockTimed(lockWait);
-        nativeAdrenoProfileElapsed(NativeProfileLock,profile_lock);
         locked=mach_absolute_time();
         spans=native_adreno_bo_memory[1];
         if(connection->live_)connection->core_->offerSystemPages(pages.descriptor?&pages:nullptr);
         if(connection->live_ && freeing)connection->core_->collectFreedPages(&freed);
-        {NativeAdrenoProfileTimer prof_dispatch(NativeProfileDispatch,method==NativeAdrenoMethodSubmit);
-         status=connection->live_?connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock):kIOReturnNotReady;}
+        status=connection->live_?connection->core_->dispatch(method,input,input_size,output,output_size,&g.clock):kIOReturnNotReady;
         if(connection->live_)connection->core_->offerSystemPages(nullptr);
         if(connection->live_ && freeing)connection->core_->collectFreedPages(nullptr);
         if(method==NativeAdrenoMethodBoMap && !status && connection->live_ && !connection->kernel_)
