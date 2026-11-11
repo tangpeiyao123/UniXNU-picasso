@@ -132,6 +132,7 @@ enum : uint8_t {
 enum : unsigned {
     ppidVadc = 0x231,           // PM7250B (USID 2), page 0x31: a page number, not a slot
     ppidSamePageUsid0 = 0x031,  // PM8150's page of the same number: logged, never used
+    ppidChgr = 0x210,           // PM7250B (USID 2), SMB5 CHGR page 0x10: a page number, not a slot
     apidSlots = 512, mapOffset = 0x900, ownerOffset = 0x700, apidStride = 0x80,
 };
 
@@ -309,6 +310,25 @@ bool readUsbState(unsigned &usbMillivolts, unsigned &senseCode) {
     return true;
 }
 
+// SMB5 charger state machine. BATTERY_CHARGER_STATUS_1 (CHGR base 0x1000 + 0x06) low 3 bits:
+//   0=INHIBIT 1=TRICKLE 2=PRE 3=FULLON 4=TAPER 5=TERMINATE 6=PAUSE 7=DISABLE.
+// 1..4 mean the battery is actually charging. This is a hardware state machine: SMB5 charges on
+// its own once a valid input is present, no software enable is required, so this read-only
+// register reports the true charge state. Register offsets from Linux smb5-reg.h.
+bool readChargerStatus(unsigned &statusOut) {
+    if (!picasso_spmi_init()) return false;
+    VadcMap core, owners;
+    if (!core.open(0xc440000, 0x2000) || !owners.open(0xc40a000, 0x1000)) return false;
+    const int slot = findSlot(core.va, owners.va, ppidChgr);
+    if (slot < 0) return false;
+    VadcMap observer;
+    if (!observer.open(0xe600000ull + uint64_t(slot) * apidStride, apidStride)) return false;
+    uint8_t status = 0;
+    if (picasso_spmi_read8(observer.va, 0x06, status)) return false;   // BATTERY_CHARGER_STATUS_1
+    statusOut = status & 0x7u;
+    return true;
+}
+
 }  // namespace
 
 void PicassoPowerSource::refreshState() {
@@ -317,10 +337,12 @@ void PicassoPowerSource::refreshState() {
     const bool usb = readUsbState(usbMillivolts, senseCode);
     const bool powered = usb && usbMillivolts >= 3000;   // VBUS rail present
     const bool full = measured && percentFor(packMillivolts) >= 100;
-    // isCharging stays false until SMB5 chgr@1000 charge-status is decoded: VBUS alone cannot
-    // tell a data cable from charging, and this board is always USB-connected, so "powered &&
-    // !full" would be permanently true and report a charge that may not be happening.
-    const bool charging = false;
+    // True charge state from SMB5's hardware state machine (BATTERY_CHARGER_STATUS_1, low 3 bits).
+    // 1..4 (TRICKLE/PRE/FULLON/TAPER) mean the battery is charging; SMB5 decides on its own whether
+    // the input (SDP/CDP/DCP) can charge, so no VBUS approximation is needed.
+    unsigned chargerStatus = 0;
+    const bool hasCharger = readChargerStatus(chargerStatus);
+    const bool charging = hasCharger && chargerStatus >= 1 && chargerStatus <= 4;
 
     setBatteryInstalled(true);
     setExternalConnected(powered);
@@ -356,9 +378,10 @@ void PicassoPowerSource::refreshState() {
     }
     OSSafeReleaseNULL(watts); OSSafeReleaseNULL(family); OSSafeReleaseNULL(adapter);
 
-    IOLog("PICASSO_BATT state mv=%u pct=%d usb=%umV powered=%d charging=%d sense_code=%u\n",
+    IOLog("PICASSO_BATT state mv=%u pct=%d usb=%umV powered=%d charging=%d chg_status=%u sense_code=%u\n",
         measured ? packMillivolts : 0, measured ? percentFor(packMillivolts) : -1,
-        usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0, senseCode);
+        usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0,
+        hasCharger ? chargerStatus : 8u, senseCode);
     updateStatus();
 }
 
