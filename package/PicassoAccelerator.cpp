@@ -18,6 +18,7 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <IOKit/pwr_mgt/IOPMPowerSource.h>
+#include <pexpert/pexpert.h>
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
@@ -426,6 +427,16 @@ bool PicassoPowerSource::start(IOService *provider) {
         OSSafeReleaseNULL(timer);
         OSSafeReleaseNULL(workLoop);
         return false;
+    }
+    // A/B switch: `sheng-batt=0` keeps the periodic reads off entirely (fixed properties only), so
+    // one binary can be compared with and without the SPMI polling. The d2 cluster sitting at
+    // busy=100 % appeared together with the charger read; this is the single-variable test that can
+    // settle whether the polling is responsible, without burning another build.
+    unsigned battEnable = 1;
+    PE_parse_boot_argn("sheng-batt", &battEnable, sizeof battEnable);
+    if (battEnable == 0) {
+        IOLog("PICASSO_BATT timer disabled (sheng-batt=0)\n");
+        return true;
     }
     // First real read ~1s after boot (publishFixedState only set fallbacks to keep the early
     // boot path light); refreshTimer then ticks every 2 s and re-reads the pack on any change.
