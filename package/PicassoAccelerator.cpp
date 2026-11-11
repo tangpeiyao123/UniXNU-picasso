@@ -379,7 +379,10 @@ void PicassoPowerSource::refreshState() {
     // the input (SDP/CDP/DCP) can charge, so no VBUS approximation is needed.
     unsigned chargerStatus = 0;
     const bool hasCharger = readChargerStatus(chargerStatus);
-    const bool charging = hasCharger && chargerStatus >= 1 && chargerStatus <= 4;
+    // Charging needs both halves to agree. CHGR alone said "3" on a cable that had just been pulled
+    // (usb=0 powered=0 charging=1 in the log), so a *valid* VBUS reading that says "no rail" vetoes
+    // it. A failed VBUS read must not veto anything: that would drop the bolt on a transient error.
+    const bool charging = hasCharger && chargerStatus >= 1 && chargerStatus <= 4 && (!usb || powered);
 
     setBatteryInstalled(true);
     setExternalConnected(powered);
