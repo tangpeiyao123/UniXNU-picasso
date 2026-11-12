@@ -37,10 +37,11 @@ def prepare(device=DEVICE, source=None):
     overlays = [device / ('patches/picasso-' + name + '-xnu.patch')
                 for name in LATE_OVERLAYS]
     ram_block_patch = device / 'patches/picasso-native-ram-block-mode1-guard.patch'
+    seed_diag_patch = device / 'patches/picasso-seed-diag-ramblock.patch'
     linux_patch = device / 'patches/picasso-linux-toolchain-v1.patch'
     seed_patch = device / 'patches/picasso-large-seed-setup.patch'
     fingerprint = hashlib.sha256(b'\0'.join(
-        p.read_bytes() for p in [patch, usb_patch, ram_block_patch, linux_patch, seed_patch, *overlays])).hexdigest()
+        p.read_bytes() for p in [patch, usb_patch, ram_block_patch, seed_diag_patch, linux_patch, seed_patch, *overlays])).hexdigest()
     cache = device / '.cache'
     target = cache / f'upstream-{revision[:12]}-{fingerprint[:12]}'
     if target.is_dir():
@@ -85,6 +86,8 @@ def prepare(device=DEVICE, source=None):
         git('apply', seed_patch, cwd=tree)
         git('apply', '--check', ram_block_patch, cwd=tree / 'drivers/RamBlock')
         git('apply', ram_block_patch, cwd=tree / 'drivers/RamBlock')
+        git('apply', '--check', seed_diag_patch, cwd=tree / 'drivers/RamBlock')
+        git('apply', seed_diag_patch, cwd=tree / 'drivers/RamBlock')
         embedded_usb_patch = tree / 'patches/xnu/zzz-picasso-usb-console.patch'
         if not embedded_usb_patch.is_file():
             raise FileNotFoundError(f'{embedded_usb_patch} missing from source patch')

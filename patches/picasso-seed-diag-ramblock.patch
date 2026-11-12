@@ -1,0 +1,55 @@
+diff --git a/NativeRamBlock.cpp b/NativeRamBlock.cpp
+index a0edd36..e986678 100644
+--- a/NativeRamBlock.cpp
++++ b/NativeRamBlock.cpp
+@@ -491,6 +491,7 @@ static int selectVolumeSeed(const char *uuid, dev_t *device, char *path, size_t
+     uint64_t *seedBase,uint64_t *seedBytes,uint8_t seedDigest[32])
+ {
+   if (!uuid || strlen(uuid) != 36 || !device || !path || size < 6) return 0;
++  IOLog("PICASSO_SEED enter uuid=%s mode=%u\n", uuid, &native_ufs_store_mode ? native_ufs_store_mode() : 0);
+   *device = NODEV;
+   path[0] = 0;
+   // The persistence worker must finish before UUID matching. Its blank scan is
+@@ -498,8 +499,15 @@ static int selectVolumeSeed(const char *uuid, dev_t *device, char *path, size_t
+   if (&native_ufs_store_mode && native_ufs_store_mode()==2) {
+     __atomic_store_n(&native_ram_block_attach_requested,1U,__ATOMIC_RELEASE);
+     unsigned waited=0;
+-    while(!__atomic_load_n(&native_ram_block_ready,__ATOMIC_ACQUIRE) && waited++<2400)IOSleep(100);
+-    if(__atomic_load_n(&native_ram_block_ready,__ATOMIC_ACQUIRE)!=1)return 0;
++    while(!__atomic_load_n(&native_ram_block_ready,__ATOMIC_ACQUIRE) && waited++<2400) {
++      if(waited==1 || waited%200==0) IOLog("PICASSO_SEED wait ready=%u waited=%u\n",
++        __atomic_load_n(&native_ram_block_ready,__ATOMIC_ACQUIRE), waited);
++      IOSleep(100);
++    }
++    if(__atomic_load_n(&native_ram_block_ready,__ATOMIC_ACQUIRE)!=1) {
++      IOLog("PICASSO_SEED ready timeout=%u\n", __atomic_load_n(&native_ram_block_ready,__ATOMIC_ACQUIRE));
++      return 0;
++    }
+   }
+   OSDictionary *matching = IOService::serviceMatching("IOMedia");
+   OSDictionary *properties = OSDictionary::withCapacity(1);
+@@ -511,12 +519,15 @@ static int selectVolumeSeed(const char *uuid, dev_t *device, char *path, size_t
+   bool ready = properties->setObject("UUID", wanted) && matching->setObject("IOPropertyMatch", properties);
+   wanted->release(); properties->release();
+   if(ready && &native_ufs_store_mode && native_ufs_store_mode()==2) {
++    IOLog("PICASSO_SEED waitMatching begin\n");
+     IOService *found=IOService::waitForMatchingService(matching,240000000000ULL);
++    IOLog("PICASSO_SEED waitMatching end\n");
+     if(found)found->release();else ready=false;
+   }
+   OSIterator *iterator = ready ? IOService::getMatchingServices(matching) : nullptr;
+   matching->release();
+-  if (!iterator) return 0;
++  IOLog("PICASSO_SEED matching done ready=%d\n", ready);
++  if (!iterator) { IOLog("PICASSO_SEED matching empty\n"); return 0; }
+   bool selected = false;
+   unsigned matches = 0;
+   dev_t candidate = NODEV;
+@@ -546,6 +557,7 @@ static int selectVolumeSeed(const char *uuid, dev_t *device, char *path, size_t
+     }
+   }
+   iterator->release();
++  IOLog("PICASSO_SEED done selected=%d matches=%u\n", selected, matches);
+   if (!selected || matches != 1) return 0;
+   *device = candidate;
+   strlcpy(path, candidatePath, size);
