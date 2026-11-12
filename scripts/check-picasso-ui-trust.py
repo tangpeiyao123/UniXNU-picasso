@@ -52,6 +52,29 @@ def main():
     assert trust.verify_bundle(bundle, library) == report
     assert report['owned_entries'] == 1 and report['original_modules_unchanged']
     count += 1
+    # Installed-library compat: the bundle must keep existing CDHashes trusted
+    # without weakening the exact-library check for the fresh one.
+    compat = ['aa' * 20, 'bb' * 20]
+    compat_bundle, compat_report = trust.make_bundle(original, library, compat)
+    assert trust.verify_bundle(compat_bundle, library, compat) == compat_report
+    assert compat_report['owned_entries'] == 3
+    assert compat_report['compat_cdhashes'] == compat
+    assert compat_report['library'] == report['library']
+    # +8 bytes of offset table, +48 per extra module.
+    assert len(compat_bundle) == len(bundle) + 8 + 2 * 48
+    count += 1
+    rejected(lambda: trust.verify_bundle(compat_bundle, library))
+    rejected(lambda: trust.verify_bundle(bundle, library, compat))
+    rejected(lambda: trust.make_bundle(original, library, ['zz' * 20]))
+    rejected(lambda: trust.make_bundle(original, library, ['aa' * 19]))
+    # A compat hash equal to the fresh library is redundant, not an error, but
+    # must not create a second module.
+    same, same_report = trust.make_bundle(original, library, [report['library']['cdhash']])
+    assert same == bundle and same_report['compat_cdhashes'] == []
+    count += 1
+    for offset in (4, 8, 12, len(compat_bundle) - 48, len(compat_bundle) - 1):
+        bad = bytearray(compat_bundle); bad[offset] ^= 1
+        rejected(lambda bad=bad: trust.verify_bundle(bytes(bad), library, compat))
     for offset in (0, 4, 12, 20, 36, 4096, 4104, 4112, len(library) - 1):
         bad = bytearray(library); bad[offset] ^= 1
         rejected(lambda bad=bad: trust.verify_bundle(bundle, bytes(bad)))

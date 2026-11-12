@@ -137,6 +137,7 @@ jobs:
           python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" --inputs "out/ipsw/$PICASSO_IPSW_BUILD" --output out/picasso/original-static-system.bundle 2>&1 | tee out/picasso/logs/actions-trust.log
           python3 scripts/prepare-picasso-ui-trust.py --original out/picasso/original-static-system.bundle \
             --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle \
+            --compat-file configs/picasso-trust-compat.json \
             2>&1 | tee out/picasso/logs/actions-ui-trust.log
           cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
 
@@ -201,7 +202,8 @@ jobs:
             # Use the signed library bound to the reused Setup seed, then rebuild
             # its precise trust bundle. No new APFS formatting or Setup mutation.
             python3 scripts/prepare-picasso-ui-trust.py --original out/picasso/original-static-system.bundle \
-              --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle
+              --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle \
+              --compat-file configs/picasso-trust-compat.json
             cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
           else
             sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \

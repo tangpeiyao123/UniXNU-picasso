@@ -1,0 +1,7 @@
+{
+  "schema": "picasso-trust-compat-v1",
+  "note": "CDHashes of inject libraries that are already present on the device. The persistent Data seed keeps the copy written when the volume was set up; rebuilding libpicasso-sb.dylib does not update it. A trust bundle that lists only the freshly built CDHash makes AMFI reject the installed file ('unsuitable CT policy 0'), the status bar hooks never install and the battery icon stays under the punch hole. Every hash here is an additional trust module, never a replacement: the freshly built library is always included as well.",
+  "cdhashes": [
+    "46583aef1e7a10ee8a62ba009ec0318b3a0bfbf2"
+  ]
+}

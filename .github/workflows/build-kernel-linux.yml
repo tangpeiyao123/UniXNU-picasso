@@ -111,7 +111,8 @@ jobs:
           python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" \
             --inputs "out/ipsw/$PICASSO_IPSW_BUILD" --output out/picasso/original-static-system.bundle
           python3 scripts/prepare-picasso-ui-trust.py --original out/picasso/original-static-system.bundle \
-            --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle
+            --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle \
+            --compat-file configs/picasso-trust-compat.json
           cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
 
       - name: Prepare the separate Darwin 23 donor

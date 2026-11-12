@@ -1,6 +1,7 @@
 """Qualify one locally built UIKit library beside unchanged original trust modules."""
 import hashlib
 from pathlib import Path
+import re
 import struct
 import uuid
 
@@ -76,39 +77,87 @@ def original_modules(original):
     return [original[first:second], original[second:]]
 
 
-def make_bundle(original, library):
+def owned_module(cdhash_hex, namespace='picasso:statusbar:'):
+    cdhash = bytes.fromhex(cdhash_hex)
+    if len(cdhash) != 20:
+        raise ValueError('Require a 20-byte CDHash')
+    identifier = uuid.uuid5(uuid.NAMESPACE_URL, namespace + cdhash_hex)
+    return struct.pack('<I16sI', 2, identifier.bytes, 1) + cdhash + bytes([2, 0, 0, 0])
+
+
+def compat_modules(compat_cdhashes, library_cdhash):
+    """One module per already-installed library CDHash.
+
+    The persistent Data seed carries the inject library that was written when the
+    volume was set up; rebuilding the library does not update that copy. A trust
+    bundle that only lists the freshly built CDHash therefore rejects the very
+    file the device is running (AMFI "unsuitable CT policy"). Keeping the
+    installed hashes here makes the image independent of which seed the
+    assemble step has to reuse.
+    """
+    modules, seen = [], {library_cdhash.lower()}
+    for cdhash in compat_cdhashes:
+        value = cdhash.strip().lower()
+        if not re.fullmatch('[0-9a-f]{40}', value):
+            raise ValueError('Compat CDHash must be 40 lowercase hex characters: %r' % cdhash)
+        if value in seen:
+            continue  # The fresh library already covers it, or it was repeated.
+        seen.add(value)
+        modules.append(owned_module(value, 'picasso:statusbar-compat:'))
+    return modules
+
+
+def make_bundle(original, library, compat_cdhashes=()):
     modules = original_modules(original)
     identity = library_identity(library)
-    cdhash = bytes.fromhex(identity['cdhash'])
-    identifier = uuid.uuid5(uuid.NAMESPACE_URL, 'picasso:statusbar:' + identity['cdhash'])
-    own = struct.pack('<I16sI', 2, identifier.bytes, 1) + cdhash + bytes([2, 0, 0, 0])
-    modules.append(own)
-    cursor, offsets = 16, []
+    modules.append(owned_module(identity['cdhash']))
+    extra = compat_modules(compat_cdhashes, identity['cdhash'])
+    modules.extend(extra)
+    cursor, offsets = 4 * (1 + len(modules)), []
     for module in modules:
         offsets.append(cursor)
         cursor += len(module)
-    bundle = struct.pack('<4I', 3, *offsets) + b''.join(modules)
+    bundle = struct.pack('<%dI' % (1 + len(modules)), len(modules), *offsets) + b''.join(modules)
     return bundle, dict(library=identity, original_bundle_sha256=TRUST_BUNDLE_SHA256,
-                        original_modules_unchanged=True, owned_entries=1,
+                        original_modules_unchanged=True, owned_entries=1 + len(extra),
+                        compat_cdhashes=[m[24:44].hex() for m in extra],
                         bundle_sha256=hashlib.sha256(bundle).hexdigest())
 
 
-def verify_bundle(bundle, library):
+def verify_bundle(bundle, library, compat_cdhashes=()):
     if len(bundle) < 16:
         raise ValueError('Truncated UI trust bundle')
-    count, first, second, third = struct.unpack_from('<4I', bundle)
-    if count != 3 or first != 16 or not first < second < third < len(bundle):
-        raise ValueError('Require two original modules and one UI module')
-    original = struct.pack('<3I', 2, 12, 12 + second - first) + bundle[first:third]
-    expected, report = make_bundle(original, library)
+    count = struct.unpack_from('<I', bundle)[0]
+    if count < 3 or count > 64:
+        raise ValueError('Require at least two original modules and one UI module')
+    header = 4 * (1 + count)
+    offsets = struct.unpack_from('<%dI' % count, bundle, 4)
+    if offsets[0] != header or list(offsets) != sorted(offsets) or offsets[-1] >= len(bundle):
+        raise ValueError('Invalid module offsets')
+    bounds = list(offsets) + [len(bundle)]
+    if any(bounds[i] >= bounds[i + 1] for i in range(len(bounds) - 1)):
+        raise ValueError('Empty trust module')
+    original = struct.pack('<3I', 2, 12, 12 + bounds[1] - offsets[0]) + bundle[offsets[0]:bounds[2]]
+    expected, report = make_bundle(original, library, compat_cdhashes)
     if bundle != expected:
         raise ValueError('UI trust module differs from the exact signed library')
     return report
 
 
-def accepted_payload_bundle(bundle, library_path, device):
+def load_compat_cdhashes(path):
+    """Read the trust-compat config; absent file means no extra hashes."""
+    if path is None:
+        return []
+    import json
+    document = json.loads(Path(path).read_text(encoding='utf-8'))
+    if document.get('schema') != 'picasso-trust-compat-v1':
+        raise ValueError('Unsupported trust-compat schema: %r' % document.get('schema'))
+    return list(document.get('cdhashes', []))
+
+
+def accepted_payload_bundle(bundle, library_path, device, compat_cdhashes=()):
     device = Path(device).resolve()
     library = (device / library_path).resolve()
     if library_path != 'out/picasso/libpicasso-sb.dylib' or not library.is_relative_to(device):
         raise ValueError('Unsupported owned trust library')
-    return verify_bundle(bundle, library.read_bytes())
+    return verify_bundle(bundle, library.read_bytes(), compat_cdhashes)
