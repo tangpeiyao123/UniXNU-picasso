@@ -22,6 +22,9 @@ LATE_OVERLAYS = [
     'quiet-boot', 'quiet-boot2', 'defer-ps', 'ls-persist',
     'staged-apps-budget', 'startup-waits', 'normal-dram-io', 'runtime-swap',
     'image-mapping', 'astc-status', 'inject-load-result', 'ui-runtime', 'settings-waits', 'persistent-records', 'brightness-properties', 'startup-cache', 'network-timeout', 'network-progress', 'runtime-jobs', 'gpu-table', 'abort-text',
+    # Last: retries the scratch Data seed lookup so a slow UFS LU cannot turn a
+    # single ENOENT into a watchdog panic before first frame.
+    'data-seed-retry',
 ]
 
 

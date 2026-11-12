@@ -353,6 +353,17 @@ jobs:
             2>&1 | tee out/picasso/logs/bootimg.log
           ls -lh out/picasso/boot/boot.img
 
+      # The bundle that passed host checks is not necessarily the table that got
+      # packed. Read the finished image: every installed library CDHash must
+      # still be trusted, otherwise AMFI rejects the file the device runs and
+      # the status bar hooks silently do nothing.
+      - name: Verify the trust table inside the finished boot image
+        run: |
+          python3 scripts/report-picasso-trust.py out/picasso/boot/boot.img \
+            --require configs/picasso-trust-compat.json \
+            --json out/picasso/logs/trust-modules.json \
+            2>&1 | tee out/picasso/logs/trust-modules.txt
+
       # A few MiB of packed seeds must outlive the disposable kernel artifacts.
       # If all copies become unavailable, reuse fails instead of formatting APFS.
       - name: Upload boot image, diagnostic kernel, reports and reusable inputs

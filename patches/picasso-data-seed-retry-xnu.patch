@@ -1,0 +1,31 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 9b4dfd7..f7506fd 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7223,8 +7223,24 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	printf("NATIVE_OWNER_DATA provider=ram uuid=%s\n", XNU_OWNER_DATA_VOLUME_UUID);
+ 	/* The typed provider supplies logical seed identity for both dense and
+ 	 * sparse media. A sparse disk has no contiguous logical-byte address. */
+-	if (!native_ram_block_volume_seed(XNU_OWNER_DATA_VOLUME_UUID, &device, device_path,
+-	    sizeof(device_path), &base, &size, native_owner_data_seed_sha256)) { error = ENOENT; goto done; }
++	/* ENOENT here means the UFS LU was not ready yet, and one miss previously
++	 * aborted the whole /private/var mount -> watchdog panic. Retry for up to
++	 * two seconds before giving up. */
++	extern void delay(int);
++	int seed_attempt;
++	int seeded = 0;
++	for (seed_attempt = 0; seed_attempt < 40 && !seeded; seed_attempt++) {
++		seeded = native_ram_block_volume_seed(XNU_OWNER_DATA_VOLUME_UUID, &device, device_path,
++		    sizeof(device_path), &base, &size, native_owner_data_seed_sha256) != 0;
++		if (!seeded) {
++			if (seed_attempt == 0 || seed_attempt == 9 ||
++			    seed_attempt == 19 || seed_attempt == 39) {
++				printf("NATIVE_OWNER_DATA seed retry attempt=%u\n", seed_attempt + 1);
++			}
++			delay(50000);
++		}
++	}
++	if (!seeded) { error = ENOENT; goto done; }
+ 	/* The typed provider's disk may be far larger than 2 GiB (a persistent Data disk keeps only its seed's nonzero pages). */
+ 	if (!size || size > UINT64_C(0x10000000000) || (size & 4095)) goto done;
+ #else
