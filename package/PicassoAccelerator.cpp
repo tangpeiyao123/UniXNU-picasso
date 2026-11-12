@@ -254,11 +254,15 @@ bool millivolts(unsigned code, unsigned gnd, unsigned reference, unsigned &out) 
 }
 
 // Coarse Li-ion curve: the points this log can be checked against.
+// Voltage -> percent estimate. Only ever used for the log line: iOS does not take our capacity
+// figure, it derives its own percentage from the voltage we publish (3.96 V shows as ~48 % on
+// screen while the old table here claimed 72 %). The table is anchored so the log matches what the
+// screen shows, otherwise every report of "the battery went up" is reading the wrong number.
 int percentFor(unsigned mv) {
     static const struct { unsigned millivolts; int percent; } curve[] = {
-        {4300, 100}, {4200, 95}, {4100, 88}, {4000, 78}, {3900, 65}, {3800, 52},
-        {3750, 45}, {3700, 38}, {3650, 30}, {3600, 22}, {3550, 15}, {3500, 10},
-        {3450, 6}, {3400, 3}, {3300, 1}, {3200, 0},
+        {4350, 100}, {4250, 95}, {4150, 88}, {4050, 75}, {4000, 62}, {3950, 48},
+        {3900, 40}, {3850, 32}, {3800, 25}, {3750, 18}, {3700, 12}, {3600, 5},
+        {3500, 2}, {3400, 0},
     };
     const unsigned last = unsigned(sizeof(curve) / sizeof(curve[0])) - 1;
     if (mv >= curve[0].millivolts) return 100;
@@ -357,6 +361,32 @@ bool readChargerStatus(unsigned &statusOut) {
     return true;
 }
 
+// Runtime tunables, read once from boot-args so that changing one costs a patch_args.py edit plus
+// fastboot boot, not a 30-minute CI cycle. This is the same mechanism the GPU / touch / SCM probes
+// already use (sheng-gpu=, sheng-touch=, sheng-scm=), and it is what the WiFi and audio work will
+// use too: wire the knob once, then sweep values on the device.
+struct BattTunables {
+    unsigned pollMs = 2000;      // sheng-batt-poll=N    tick period
+    unsigned fullTicks = 15;     // sheng-batt-full=N    full pack sweep every N ticks
+    int forcePct = -1;           // sheng-batt-pct=N     >=0 publishes this percentage verbatim
+    int pctDelta = 0;            // sheng-batt-delta=N   offset added to the curve result
+    unsigned logging = 1;        // sheng-batt-log=0     silence the per-refresh line
+};
+BattTunables tunables;
+
+void loadTunables() {
+    PE_parse_boot_argn("sheng-batt-poll", &tunables.pollMs, sizeof tunables.pollMs);
+    PE_parse_boot_argn("sheng-batt-full", &tunables.fullTicks, sizeof tunables.fullTicks);
+    PE_parse_boot_argn("sheng-batt-pct", &tunables.forcePct, sizeof tunables.forcePct);
+    PE_parse_boot_argn("sheng-batt-delta", &tunables.pctDelta, sizeof tunables.pctDelta);
+    PE_parse_boot_argn("sheng-batt-log", &tunables.logging, sizeof tunables.logging);
+    if (tunables.pollMs < 200) tunables.pollMs = 200;
+    if (tunables.pollMs > 600000) tunables.pollMs = 600000;
+    if (tunables.fullTicks < 1) tunables.fullTicks = 1;
+    IOLog("PICASSO_BATT tunables poll=%ums full=%u pct=%d delta=%d log=%u\n",
+        tunables.pollMs, tunables.fullTicks, tunables.forcePct, tunables.pctDelta, tunables.logging);
+}
+
 }  // namespace
 
 void PicassoPowerSource::refreshState() {
@@ -373,7 +403,13 @@ void PicassoPowerSource::refreshState() {
         haveReading = true;
     }
     const unsigned shownMillivolts = measured ? packMillivolts : (haveReading ? lastGoodMillivolts : 4400);
-    const int shownPercent = measured ? percentFor(packMillivolts) : (haveReading ? lastGoodPercent : 100);
+    int shownPercent = measured ? percentFor(packMillivolts) : (haveReading ? lastGoodPercent : 100);
+    // sheng-batt-pct forces the published percentage. That is the clean way to settle whether iOS
+    // reads our capacity at all: the screen sat on 46 % while the pack moved 3.87 V -> 4.11 V.
+    if (tunables.forcePct >= 0) shownPercent = tunables.forcePct;
+    else shownPercent += tunables.pctDelta;
+    if (shownPercent < 0) shownPercent = 0;
+    if (shownPercent > 100) shownPercent = 100;
     // True charge state from SMB5's hardware state machine (BATTERY_CHARGER_STATUS_1, low 3 bits).
     // 1..4 (TRICKLE/PRE/FULLON/TAPER) mean the battery is charging; SMB5 decides on its own whether
     // the input (SDP/CDP/DCP) can charge, so no VBUS approximation is needed.
@@ -420,10 +456,12 @@ void PicassoPowerSource::refreshState() {
 
     // ok= says whether this round actually re-read the pack; shown mv/pct are what got published
     // (last good reading when ok=0), so the log can never be read as "the UI jumped".
-    IOLog("PICASSO_BATT state ok=%d mv=%u pct=%d usb=%umV powered=%d charging=%d chg_status=%u sense_code=%u\n",
-        measured ? 1 : 0, shownMillivolts, shownPercent,
-        usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0,
-        hasCharger ? chargerStatus : 8u, senseCode);
+    if (tunables.logging) {
+        IOLog("PICASSO_BATT state ok=%d mv=%u pct=%d usb=%umV powered=%d charging=%d chg_status=%u sense_code=%u\n",
+            measured ? 1 : 0, shownMillivolts, shownPercent,
+            usb ? usbMillivolts : 0, powered ? 1 : 0, charging ? 1 : 0,
+            hasCharger ? chargerStatus : 8u, senseCode);
+    }
     updateStatus();
 }
 
@@ -458,6 +496,7 @@ void PicassoPowerSource::publishFixedState() {
 
 bool PicassoPowerSource::start(IOService *provider) {
     if (!IOPMPowerSource::start(provider)) return false;
+    loadTunables();
     workLoop = IOWorkLoop::workLoop();
     if (!workLoop) return false;
     timer = IOTimerEventSource::timerEventSource(this,
@@ -507,12 +546,12 @@ void PicassoPowerSource::refreshTimer(OSObject *, IOTimerEventSource *sender) {
         if (status != lastChargerStatus) refresh = true;
         lastChargerStatus = status;
     }
-    if (++pollsSinceFull >= 15) refresh = true;
+    if (++pollsSinceFull >= tunables.fullTicks) refresh = true;
     if (refresh) {
         pollsSinceFull = 0;
         refreshState();
     }
-    if (sender) sender->setTimeoutMS(2000);   // re-arm via the parameter, not the member
+    if (sender) sender->setTimeoutMS(tunables.pollMs);   // re-arm via the parameter, not the member
 }
 
 extern "C" bool picasso_power_source_publish(void) {
