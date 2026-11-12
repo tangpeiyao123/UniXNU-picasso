@@ -4459,6 +4459,12 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 {
 	struct eagl *e = context_of(self);
 	static unsigned attached;
+	/* The first IOSurface an EAGL context is handed is where a boot that never submits
+	 * stops: backboardd's device opens, its context is made, and then no command buffer
+	 * ever reaches the accelerator. Eight traces bound it so the last one printed says
+	 * which call of this function the hang is inside. */
+	static unsigned atk_trace;
+	int tr;
 	struct image *image;
 	GLint texture = 0;
 	uint32_t pixels;
@@ -4468,10 +4474,16 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	if (e == NULL || surface == NULL) {
 		return NO;
 	}
+	tr = atk_trace++ < 8;
+	if (tr) ktrace("atk enter target=%lx", target);
 	eagl_enter(e, 0);
+	if (tr) ktrace("atk entered");
 	clear_now(e);
+	if (tr) ktrace("atk cleared");
 	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+	if (tr) ktrace("atk texture=%d", texture);
 	pixels = IOSurfaceGetPixelFormat(surface);
+	if (tr) ktrace("atk pixfmt=%x", pixels);
 	if (target != GL_TEXTURE_2D || texture == 0 || (pixels != 'BGRA' && pixels != 0) ||
 	    IOSurfaceGetBytesPerElement(surface) != 4 || IOSurfaceGetPlaneCount(surface) != 0 ||
 	    (image = image_new(e, (GLuint)texture, surface)) == NULL) {
@@ -4498,6 +4510,7 @@ my_attachImage(id self, SEL selector, unsigned long target, IOSurfaceRef surface
 	 * there being no pixel format.
 	 */
 	image->wrapped = image->alpha_first = pixels == 0;
+	if (tr) ktrace("atk image ok %dx%d", image->width, image->height);
 	note_format("IOSurface attached", GL_BGRA, GL_BGRA, GL_UNSIGNED_BYTE, image->width, image->height);
 	/*
 	 * What is attached is as often read as drawn into (a picture CoreAnimation has made a surface
