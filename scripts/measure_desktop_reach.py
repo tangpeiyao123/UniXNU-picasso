@@ -18,16 +18,54 @@ Counters per session:
     kick      number of 'vsync: kick' hits (8 = window server submitted frames)
     desktop   sum of backboardd / SpringBoard / WindowServer / frontboard hits
     panic     number of lines starting with 'panic('
+    frames    number of 'PICASSO_DPU_FRAME' lines (one per 30 flips)
+    eagl      'eagl init gl=' hits: the GL client created a context
+    texk      'texk IOSurface attached' hits: the first drawable was bound
 
 Verdict: PASS = vsync >= 17 and desktop > 0; otherwise STALL.
+A session the host rebooted before the judgement window (`CMD SENT ...
+reboot-fastboot` within --window seconds of its banner) never had a chance to
+reach a verdict, so it is reported as TRUNC and excluded from the valid rate.
+Its own numbers stay in the table.
 """
 import argparse
+import datetime
 import os
 import re
 import sys
 
 BANNER = "Darwin Kernel Version"
 DESKTOP_MARKERS = ("backboardd", "SpringBoard", "WindowServer", "frontboard")
+HOST_STAMP = re.compile(r"host=(\S+)")
+
+
+def host_time(line):
+    m = HOST_STAMP.search(line)
+    if not m:
+        return None
+    try:
+        return datetime.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S.%f")
+    except ValueError:
+        return None
+
+
+def banner_epoch(seg_before, lines, start):
+    """Host time of the KERNEL BANNER marker that announced this session."""
+    for j in range(start - 1, max(0, start - 40), -1):
+        if "KERNEL BANNER" in lines[j]:
+            return host_time(lines[j])
+    return None
+
+
+def reboot_after_banner(seg):
+    """Host time of the last 'reboot-fastboot' this session was sent."""
+    last = None
+    for line in seg:
+        if "CMD SENT" in line and "reboot-fastboot" in line:
+            t = host_time(line)
+            if t:
+                last = t
+    return last
 
 
 def load_sessions(paths):
@@ -49,12 +87,12 @@ def load_sessions(paths):
     # 2026-11-13 log). Anchor to the line start so only a real boot counts.
     starts = [i for i, l in enumerate(lines) if l.startswith(BANNER)]
     if not starts:
-        return []
+        return [], lines
     sessions = []
     for k, s in enumerate(starts):
         e = starts[k + 1] if k + 1 < len(starts) else len(lines)
-        sessions.append((k + 1, lines[s:e]))
-    return sessions
+        sessions.append((k + 1, lines[s:e], s))
+    return sessions, lines
 
 
 def stall_subtype(seg):
@@ -83,9 +121,9 @@ def stall_subtype(seg):
     return "STALL_SILENT", "no UI marker, no panic: boot stopped before SpringBoard"
 
 
-def measure(sessions):
+def measure(sessions, all_lines, window=300.0):
     rows = []
-    for idx, seg in sessions:
+    for idx, seg, start in sessions:
         body = "\n".join(seg)
         vsync = body.count("vsync")
         kick = body.count("vsync: kick")
@@ -95,13 +133,26 @@ def measure(sessions):
         eagl = body.count("eagl init gl=")
         texk = body.count("texk IOSurface attached")
         verdict = "PASS" if (vsync >= 17 and desktop > 0) else "STALL"
+        # A reboot the host sent inside the judgement window ended this boot
+        # before it could reach a verdict: that is not evidence about the boot.
+        boot_t = banner_epoch(None, all_lines, start)
+        rb_t = reboot_after_banner(seg)
+        age = (rb_t - boot_t).total_seconds() if (boot_t and rb_t) else None
+        truncated = bool(verdict == "STALL" and age is not None and age < window)
         last = next((l for l in reversed(seg) if l.strip()), "")
         subtype = detail = ""
         if verdict == "STALL":
             subtype, detail = stall_subtype(seg)
+        if truncated:
+            verdict = "TRUNC"
+            subtype = "TRUNCATED_BY_HOST"
+            detail = "host reboot %.0f s after the banner, before the %.0f s window" % (
+                age, window)
+        elif age is not None:
+            detail = (detail + " | " if detail else "") + "rebooted at %.0f s" % age
         rows.append(dict(n=idx, vsync=vsync, kick=kick, desktop=desktop,
                          panic=panic, frames=frames, eagl=eagl, texk=texk,
-                         verdict=verdict, last=last[:110],
+                         verdict=verdict, last=last[:110], age=age,
                          subtype=subtype, detail=detail, seg=seg))
     return rows
 
@@ -114,18 +165,20 @@ def main():
                     help="require exactly N PASS sessions, exit 4 if not met")
     ap.add_argument("--stall-dir", default="logs",
                     help="directory to dump each STALL session (default logs/)")
+    ap.add_argument("--window", type=float, default=300.0,
+                    help="judgement window: a host reboot earlier than this after "
+                         "the banner marks the session TRUNC (default 300 s)")
     args = ap.parse_args()
 
-    sessions = load_sessions(args.log)
-    if sessions is None:
-        return 3
+    sessions, lines = load_sessions(args.log)
     if not sessions:
         print("NO_SESSION: no Darwin banner in %s" % args.log)
         return 3
 
-    rows = measure(sessions)
+    rows = measure(sessions, lines, args.window)
     n_pass = sum(1 for r in rows if r["verdict"] == "PASS")
-    n_stall = len(rows) - n_pass
+    n_trunc = sum(1 for r in rows if r["verdict"] == "TRUNC")
+    n_stall = len(rows) - n_pass - n_trunc
 
     print("sess  vsync  kick  desktop  panic  frames  eagl  texk  verdict  subtype")
     for r in rows:
@@ -134,8 +187,12 @@ def main():
                r["frames"], r["eagl"], r["texk"], r["verdict"],
                r["subtype"] or "-"))
 
-    print("\nTOTAL %d sessions  PASS %d  STALL %d  pass-rate %.1f%%"
-          % (len(rows), n_pass, n_stall, 100.0 * n_pass / len(rows)))
+    print("\nTOTAL %d sessions  PASS %d  STALL %d  TRUNC %d  pass-rate %.1f%%"
+          % (len(rows), n_pass, n_stall, n_trunc, 100.0 * n_pass / len(rows)))
+    valid = len(rows) - n_trunc
+    if n_trunc:
+        print("VALID %d sessions (TRUNC excluded)  PASS %d  STALL %d  pass-rate %.1f%%"
+              % (valid, n_pass, n_stall, 100.0 * n_pass / valid))
     print("PASS = vsync>=17 and desktop>0 (display armed + UI up). It is NOT a"
           " frame count: PASS sessions that were rebooted early show frames=0.")
     n_frames = sum(1 for r in rows if r["frames"])
@@ -147,6 +204,8 @@ def main():
     from collections import Counter
     subtype_count = Counter()
     for r in rows:
+        if r["verdict"] == "TRUNC":
+            print("  TRUNC #%d [%s] %s" % (r["n"], r["subtype"], r["detail"]))
         if r["verdict"] == "STALL":
             subtype_count[r["subtype"]] += 1
             fn = os.path.join(args.stall_dir, "stall-%02d.txt" % r["n"])

@@ -88,6 +88,24 @@ def main():
                          "otherwise the run stops before the first frame is drawn")
     args = ap.parse_args()
 
+    # One instance per command file. Two loops sharing it rebooted a boot that
+    # was still in progress on 2026-11-13 22:04:38 and 22:07:14 (both commands
+    # predate this script's 22:08:15 start), which cost two sessions.
+    lock = None
+    if args.cmd_file:
+        lock_path = args.cmd_file + ".lock"
+        try:
+            if os.path.exists(lock_path) and time.time() - os.path.getmtime(lock_path) > 6 * 3600:
+                os.remove(lock_path)          # stale lock from a killed run
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            lock = lock_path
+        except FileExistsError:
+            print("[%s] another reproduction owns %s (lock %s); refusing to start"
+                  % (time.strftime("%H:%M:%S"), args.cmd_file, lock_path), flush=True)
+            return 2
+
     def send_reboot():
         """Soft reboot via the kernel's CDC 'reboot-fastboot' command."""
         if not args.cmd_file:
@@ -108,6 +126,8 @@ def main():
             if time.time() - t0 > args.wait_cycle:
                 print("[%s] cycle %d: no new banner in %.0fs, aborting"
                       % (time.strftime("%H:%M:%S"), cycle, args.wait_cycle), flush=True)
+                if lock:
+                    os.remove(lock)
                 return 3
             time.sleep(2)
 
@@ -149,6 +169,8 @@ def main():
     for i, r in enumerate(results, 1):
         print("  cycle %d: %s" % (i, r))
     print("pass-rate %d/%d = %.1f%%" % (n_pass, len(results), 100.0 * n_pass / len(results)))
+    if lock:
+        os.remove(lock)
     return 0
 
 
