@@ -52,12 +52,19 @@ def read_session(path, index):
     return lines[s:e]
 
 
-def judge(seg):
+def judge(seg, min_frames=0):
+    """Verdict for one boot.
+
+    min_frames counts PICASSO_DPU_FRAME lines, and the driver prints one line per
+    30 flips, so min_frames=2 means >=60 flips. The default 0 keeps the old
+    display-armed rule; a desktop claim needs --min-frames 2, because the armed
+    state alone was measured on sessions that never rendered (2026-11-13)."""
     body = "\n".join(seg)
     vsync = body.count("vsync")
     desktop = sum(body.count(m) for m in DESKTOP)
     panic = sum(1 for l in seg if l.startswith("panic("))
-    if vsync >= 17 and desktop > 0:
+    frames = body.count("PICASSO_DPU_FRAME")
+    if vsync >= 17 and desktop > 0 and frames >= min_frames:
         return "PASS", vsync, desktop, panic
     if panic:
         return "STALL_SEED", vsync, desktop, panic
@@ -72,7 +79,22 @@ def main():
     ap.add_argument("--start-banner", type=int, default=-1)
     ap.add_argument("--wait-cycle", type=float, default=900.0,
                     help="max seconds to wait for the next power-cycle before giving up")
+    ap.add_argument("--cmd-file", default=None,
+                    help="when set, PASS and STALL_GPU sessions are soft-rebooted by "
+                         "writing 'reboot-fastboot' here (the recorder forwards it)")
+    ap.add_argument("--min-frames", type=int, default=0,
+                    help="extra PASS condition: PICASSO_DPU_FRAME lines seen (one per 30 "
+                         "flips). 0 keeps the armed-only rule; use 2 for a desktop claim, "
+                         "otherwise the run stops before the first frame is drawn")
     args = ap.parse_args()
+
+    def send_reboot():
+        """Soft reboot via the kernel's CDC 'reboot-fastboot' command."""
+        if not args.cmd_file:
+            return
+        with open(args.cmd_file, "w", encoding="utf-8") as f:
+            f.write("reboot-fastboot\n")
+        print("[%s]   -> sent reboot-fastboot" % time.strftime("%H:%M:%S"), flush=True)
 
     base = count_banners(args.log) if args.start_banner < 0 else args.start_banner
     print("[%s] reproduction start: %d banners already in file, %d cycles, window %.0fs"
@@ -101,19 +123,26 @@ def main():
             if seg is None:
                 time.sleep(2)
                 continue
-            v, vsync, desktop, panic = judge(seg)
+            v, vsync, desktop, panic = judge(seg, args.min_frames)
             if v:
                 verdict = v
                 break
             if time.time() - t0 > args.window:
                 verdict = "STALL_GPU"
-                v, vsync, desktop, panic = judge(seg)
+                v, vsync, desktop, panic = judge(seg, args.min_frames)
                 break
             time.sleep(3)
 
         results.append(verdict)
         print("[%s] cycle %d: %s  (vsync=%s desktop=%s panic=%s)"
               % (time.strftime("%H:%M:%S"), cycle, verdict, vsync, desktop, panic), flush=True)
+
+        # STALL_SEED panics and reboots on its own. PASS and STALL_GPU need the
+        # soft reboot; both respond because the USB poller keeps running even
+        # while the GPU fence is frozen.
+        if verdict in ("PASS", "STALL_GPU"):
+            send_reboot()
+            time.sleep(5)
 
     n_pass = sum(1 for r in results if r == "PASS")
     print("\n=== RESULT ===")

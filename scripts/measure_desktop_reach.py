@@ -58,7 +58,12 @@ def load_sessions(paths):
 
 
 def stall_subtype(seg):
-    """Classify a STALL session by its first diagnostic line."""
+    """Classify a STALL session by the stage it actually reached.
+
+    The drawable attach is the first point where the render path has a surface
+    to draw into: sessions that print it go on to submit frames, sessions that
+    do not never render (11 sessions of 2026-11-13: 3 attached -> all PASS,
+    8 did not -> all STALL). Report it instead of guessing "GPU stall"."""
     body = "\n".join(seg)
     pan = next((l for l in seg if l.startswith("panic(")), None)
     if pan:
@@ -66,10 +71,16 @@ def stall_subtype(seg):
     if "iBoot didn't extract panic log" in body:
         return "STALL_CRASH_RECOVERY", \
             "iBoot didn't extract panic log from previous session crash"
+    if "texk IOSurface attached" in body:
+        return "STALL_AFTER_DRAWABLE", \
+            "drawable attached but no frame reached the display"
+    if "eagl init gl=" in body:
+        return "STALL_NO_DRAWABLE", \
+            "EAGL context created, first IOSurface was never attached"
     desktop = sum(body.count(m) for m in DESKTOP_MARKERS)
     if desktop > 0:
-        return "STALL_EARLY", "desktop markers present but no frame (GPU stall)"
-    return "STALL_EARLY", "banner then silence (early hang)"
+        return "STALL_NO_GL", "UI markers but the GL client never started"
+    return "STALL_SILENT", "no UI marker, no panic: boot stopped before SpringBoard"
 
 
 def measure(sessions):
@@ -80,13 +91,17 @@ def measure(sessions):
         kick = body.count("vsync: kick")
         desktop = sum(body.count(m) for m in DESKTOP_MARKERS)
         panic = sum(1 for l in seg if l.startswith("panic("))
+        frames = body.count("PICASSO_DPU_FRAME")
+        eagl = body.count("eagl init gl=")
+        texk = body.count("texk IOSurface attached")
         verdict = "PASS" if (vsync >= 17 and desktop > 0) else "STALL"
         last = next((l for l in reversed(seg) if l.strip()), "")
         subtype = detail = ""
         if verdict == "STALL":
             subtype, detail = stall_subtype(seg)
         rows.append(dict(n=idx, vsync=vsync, kick=kick, desktop=desktop,
-                         panic=panic, verdict=verdict, last=last[:110],
+                         panic=panic, frames=frames, eagl=eagl, texk=texk,
+                         verdict=verdict, last=last[:110],
                          subtype=subtype, detail=detail, seg=seg))
     return rows
 
@@ -112,14 +127,19 @@ def main():
     n_pass = sum(1 for r in rows if r["verdict"] == "PASS")
     n_stall = len(rows) - n_pass
 
-    print("sess  vsync  kick  desktop  panic  verdict  subtype")
+    print("sess  vsync  kick  desktop  panic  frames  eagl  texk  verdict  subtype")
     for r in rows:
-        print("%4d  %5d  %4d  %7d  %5d  %-6s  %s" %
+        print("%4d  %5d  %4d  %7d  %5d  %6d  %4d  %4d  %-6s  %s" %
               (r["n"], r["vsync"], r["kick"], r["desktop"], r["panic"],
-               r["verdict"], r["subtype"] or "-"))
+               r["frames"], r["eagl"], r["texk"], r["verdict"],
+               r["subtype"] or "-"))
 
     print("\nTOTAL %d sessions  PASS %d  STALL %d  pass-rate %.1f%%"
           % (len(rows), n_pass, n_stall, 100.0 * n_pass / len(rows)))
+    print("PASS = vsync>=17 and desktop>0 (display armed + UI up). It is NOT a"
+          " frame count: PASS sessions that were rebooted early show frames=0.")
+    n_frames = sum(1 for r in rows if r["frames"])
+    print("sessions with >=1 DPU_FRAME: %d/%d" % (n_frames, len(rows)))
 
     # Dump every STALL session and print its diagnostic, so the failure can be
     # split into repairable root causes instead of one "STALL" bucket.
