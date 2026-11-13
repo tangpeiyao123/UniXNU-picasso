@@ -76,6 +76,15 @@ enum wlan_transport {
 #define WLAN_MSA_BASE 0x8ba00000ULL
 #define WLAN_MSA_SIZE 0x200000ULL
 
+// Cross-checked byte-for-byte against the live device tree dump
+// (k30i-ios/picasso-dt-dump.txt, 2026-11-13 15:40):
+//   [/reserved-memory/pil_wlan_fw_region@8ba00000] reg = <0x0 0x8ba00000 0x0 0x200000>, phandle = <0x99>
+//   [/reserved-memory/modem_wlan_region@8c000000]  reg = <0x0 0x8c000000 0x0 0xf800000>, phandle = '\x00\x00\x00s'
+//   [/soc/qcom,icnss@18800000] compatible = 'qcom,icnss', iommus = <0x18 0xc0 0x1>,
+//                              qcom,wlan-msa-fixed-region = <0x99>,
+//                              reg = <0x18800000 0x800000 0xb0000000 0x10000>
+// All six values below match; nothing here is inferred from the vendor DTS alone.
+//
 // Adjacent modem PIL region, for orientation only: modem_wlan_region@8c000000, 0xf800000 bytes (picasso.dts:485-489),
 // phandle 0x73. pil_modem (picasso.dts:6451-6477) loads qcom,firmware-name = "modem" into this region. The WLAN
 // SMP2P endpoints live under the modem's smp2p block, which indicates the WLFW service is reached over the modem

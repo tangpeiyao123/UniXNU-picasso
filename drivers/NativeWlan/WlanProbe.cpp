@@ -37,6 +37,7 @@ volatile uint64_t native_wlan_msa_base = WLAN_MSA_BASE, native_wlan_msa_size = W
 volatile uint32_t native_wlan_msa_pages, native_wlan_msa_word;
 volatile uint32_t native_wlan_msa_head[16];   // first 64 bytes of the MSA region
 volatile uint32_t native_wlan_msa_elf;         // 1 when the head starts with the ELF magic
+volatile uint32_t native_wlan_msa_head_kind;   // 0 unknown, 1 ELF, 2 MBN v3/v5, 3 all zero
 volatile uint32_t native_wlan_fw_present, native_wlan_fw_segments, native_wlan_fw_hash, native_wlan_fw_payload;
 volatile uint32_t native_wlan_handshake_step;
 volatile int native_wlan_handshake_error;
@@ -199,13 +200,43 @@ int stage2(void *ctx) {
     if (!pages) return fail(23, WLAN_ERR_INVAL);
     native_wlan_msa_pages = static_cast<uint32_t>(pages);
     if (!mapRegion(WLAN_MSA_BASE, 0x1000, s->msa)) return fail(23, WLAN_ERR_NOMEM);
-    native_wlan_msa_word = rd32(s->msa.va, 0);
+    // Read the whole first 64 bytes, not just word 0. Whether the bootloader staged firmware into this
+    // reserved region, and in which container, is answered by the head alone; everything else in this
+    // driver depends on that answer. Read-only: two MMIO bursts inside one mapped page, no writes.
+    for (unsigned i = 0; i < 16; ++i) {
+        native_wlan_msa_head[i] = rd32(s->msa.va, 4 * i);
+    }
+    native_wlan_msa_word = native_wlan_msa_head[0];
+    // 7f 45 4c 46 = ELF. A Qualcomm MBN starts with a small image id followed by header version 3 or 5.
+    // An all-zero head means the region was never written. Anything else stays "unknown" rather than
+    // being forced into one of the two shapes.
+    unsigned head_kind = 0;   // 0 unknown, 1 ELF, 2 MBN v3/v5, 3 all zero
+    if (native_wlan_msa_head[0] == 0x464c457fu) {
+        head_kind = 1;
+    } else if (native_wlan_msa_head[0] <= 0xffu &&
+               (native_wlan_msa_head[1] == 3u || native_wlan_msa_head[1] == 5u)) {
+        head_kind = 2;
+    } else {
+        unsigned nonzero = 0;
+        for (unsigned i = 0; i < 16; ++i) nonzero += native_wlan_msa_head[i] != 0;
+        if (!nonzero) head_kind = 3;
+    }
+    native_wlan_msa_elf = head_kind == 1 ? 1u : 0u;
+    native_wlan_msa_head_kind = head_kind;
 
     printf("PICASSO_WLAN stage2 idr=%08x/%08x/%08x sid=%x slot=%u matches=%u smr=%08x s2cr=%08x "
-           "msa=%llx pages=%u word=%08x\n",
+           "msa=%llx pages=%u word=%08x head_kind=%u\n",
            native_wlan_smmu_idr[0], native_wlan_smmu_idr[1], native_wlan_smmu_idr[2], native_wlan_sid,
            native_wlan_smmu_slot, matches, native_wlan_smmu_smr, native_wlan_smmu_s2cr,
-           (unsigned long long)native_wlan_msa_base, native_wlan_msa_pages, native_wlan_msa_word);
+           (unsigned long long)native_wlan_msa_base, native_wlan_msa_pages, native_wlan_msa_word,
+           head_kind);
+    printf("PICASSO_WLAN msa_head %08x %08x %08x %08x %08x %08x %08x %08x "
+           "%08x %08x %08x %08x %08x %08x %08x %08x kind=%s\n",
+           native_wlan_msa_head[0], native_wlan_msa_head[1], native_wlan_msa_head[2], native_wlan_msa_head[3],
+           native_wlan_msa_head[4], native_wlan_msa_head[5], native_wlan_msa_head[6], native_wlan_msa_head[7],
+           native_wlan_msa_head[8], native_wlan_msa_head[9], native_wlan_msa_head[10], native_wlan_msa_head[11],
+           native_wlan_msa_head[12], native_wlan_msa_head[13], native_wlan_msa_head[14], native_wlan_msa_head[15],
+           head_kind == 1 ? "elf" : head_kind == 2 ? "mbn" : head_kind == 3 ? "zero" : "unknown");
     return 0;
 }
 
