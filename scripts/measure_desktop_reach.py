@@ -43,6 +43,10 @@ def load_sessions(paths):
             print("MISSING %s" % p, file=sys.stderr)
             return None
         lines.extend(open(p, encoding="utf-8", errors="replace").read().splitlines())
+    # startswith, not `in`: a panic log echoes "Kernel version: Darwin Kernel
+    # Version ..." on its own line, and matching the substring counts each of
+    # those as a fresh session (34 real banners vs 43 substring hits in the
+    # 2026-11-13 log). Anchor to the line start so only a real boot counts.
     starts = [i for i, l in enumerate(lines) if l.startswith(BANNER)]
     if not starts:
         return []
@@ -51,6 +55,21 @@ def load_sessions(paths):
         e = starts[k + 1] if k + 1 < len(starts) else len(lines)
         sessions.append((k + 1, lines[s:e]))
     return sessions
+
+
+def stall_subtype(seg):
+    """Classify a STALL session by its first diagnostic line."""
+    body = "\n".join(seg)
+    pan = next((l for l in seg if l.startswith("panic(")), None)
+    if pan:
+        return "STALL_SEED", pan
+    if "iBoot didn't extract panic log" in body:
+        return "STALL_CRASH_RECOVERY", \
+            "iBoot didn't extract panic log from previous session crash"
+    desktop = sum(body.count(m) for m in DESKTOP_MARKERS)
+    if desktop > 0:
+        return "STALL_EARLY", "desktop markers present but no frame (GPU stall)"
+    return "STALL_EARLY", "banner then silence (early hang)"
 
 
 def measure(sessions):
@@ -63,8 +82,12 @@ def measure(sessions):
         panic = sum(1 for l in seg if l.startswith("panic("))
         verdict = "PASS" if (vsync >= 17 and desktop > 0) else "STALL"
         last = next((l for l in reversed(seg) if l.strip()), "")
+        subtype = detail = ""
+        if verdict == "STALL":
+            subtype, detail = stall_subtype(seg)
         rows.append(dict(n=idx, vsync=vsync, kick=kick, desktop=desktop,
-                         panic=panic, verdict=verdict, last=last[:110]))
+                         panic=panic, verdict=verdict, last=last[:110],
+                         subtype=subtype, detail=detail, seg=seg))
     return rows
 
 
@@ -74,6 +97,8 @@ def main():
                     help="console log path; repeat for several files (ordered)")
     ap.add_argument("--require", type=int, default=0,
                     help="require exactly N PASS sessions, exit 4 if not met")
+    ap.add_argument("--stall-dir", default="logs",
+                    help="directory to dump each STALL session (default logs/)")
     args = ap.parse_args()
 
     sessions = load_sessions(args.log)
@@ -87,18 +112,32 @@ def main():
     n_pass = sum(1 for r in rows if r["verdict"] == "PASS")
     n_stall = len(rows) - n_pass
 
-    print("sess  vsync  kick  desktop  panic  verdict")
+    print("sess  vsync  kick  desktop  panic  verdict  subtype")
     for r in rows:
-        print("%4d  %5d  %4d  %7d  %5d  %-6s" %
-              (r["n"], r["vsync"], r["kick"], r["desktop"], r["panic"], r["verdict"]))
+        print("%4d  %5d  %4d  %7d  %5d  %-6s  %s" %
+              (r["n"], r["vsync"], r["kick"], r["desktop"], r["panic"],
+               r["verdict"], r["subtype"] or "-"))
 
     print("\nTOTAL %d sessions  PASS %d  STALL %d  pass-rate %.1f%%"
           % (len(rows), n_pass, n_stall, 100.0 * n_pass / len(rows)))
 
-    # For the reproduction test: show where each STALL stopped.
+    # Dump every STALL session and print its diagnostic, so the failure can be
+    # split into repairable root causes instead of one "STALL" bucket.
+    os.makedirs(args.stall_dir, exist_ok=True)
+    from collections import Counter
+    subtype_count = Counter()
     for r in rows:
         if r["verdict"] == "STALL":
-            print("  STALL #%d last-line: %s" % (r["n"], r["last"]))
+            subtype_count[r["subtype"]] += 1
+            fn = os.path.join(args.stall_dir, "stall-%02d.txt" % r["n"])
+            with open(fn, "w", encoding="utf-8") as f:
+                f.write("\n".join(r["seg"]))
+            print("  STALL #%d [%s] %s -> %s"
+                  % (r["n"], r["subtype"], r["detail"][:80], fn))
+
+    print("\nsubtype histogram:")
+    for k, v in subtype_count.most_common():
+        print("  %-24s %d" % (k, v))
 
     if args.require and n_pass != args.require:
         print("REQUIRE FAIL: expected %d PASS, got %d" % (args.require, n_pass))
