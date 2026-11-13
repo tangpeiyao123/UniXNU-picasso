@@ -22,9 +22,13 @@ LATE_OVERLAYS = [
     'quiet-boot', 'quiet-boot2', 'defer-ps', 'ls-persist',
     'staged-apps-budget', 'startup-waits', 'normal-dram-io', 'runtime-swap',
     'image-mapping', 'astc-status', 'inject-load-result', 'ui-runtime', 'settings-waits', 'persistent-records', 'brightness-properties', 'startup-cache', 'network-timeout', 'network-progress', 'runtime-jobs', 'gpu-table', 'abort-text',
-    # Last: retries the scratch Data seed lookup so a slow UFS LU cannot turn a
-    # single ENOENT into a watchdog panic before first frame.
-    'data-seed-retry',
+    # 'data-seed-retry' is held out of the build on purpose. It wraps
+    # native_ram_block_volume_seed(), whose 240 s wait lives inside the call it
+    # retries, so a boot that already times out would wait 40 x 240 s before
+    # panicking. The next build must measure the timeout first (PICASSO_SEED
+    # diagnostics from picasso-seed-diag-ramblock.patch); the bounded retry is
+    # tracked in patches/held/ and must not be re-added until it shares one
+    # deadline with the wait. See docs/boot-stability-diagnosis-20261113.md.
 ]
 
 
