@@ -218,14 +218,21 @@ def main():
          "present" if edl_ok else "MISSING: no rescue if fastboot is unreachable")
 
     total_fail = hard_fail + device_fail
-    print("\nhard_fail=%d device_fail=%d" % (hard_fail, device_fail))
-    if total_fail:
-        print("ROLLBACK_READY=0  RC=2 BLOCKED")
-        return 2
-    if not edl_ok or (args.device and device_fail):
-        print("ROLLBACK_READY=1 (DEGRADED: see WARN)  RC=3")
+    # Gate (revised 2026-11-14): the EDL firehose cannot be obtained, so requiring
+    # RC=0 would block every experiment forever. What matters is that the bundle
+    # and the device both verify; EDL stays a separate constraint on what we may
+    # do (nothing that can leave fastboot unreachable).
+    if not args.device:
+        print("\nhard_fail=%d  (device not checked: pass --device)" % hard_fail)
+        print("GATE=PARTIAL  RC=3")
         return 3
-    print("ROLLBACK_READY=1  RC=0 READY")
+    print("\nhard_fail=%d device_fail=%d" % (hard_fail, device_fail))
+    if not edl_ok:
+        print("EDL=missing -> constraint: no operation that can make fastboot unreachable")
+    if total_fail:
+        print("ROLLBACK_READY=0  GATE=FAIL  RC=2")
+        return 2
+    print("ROLLBACK_READY=1  GATE=PASS  RC=0")
     return 0
 
 

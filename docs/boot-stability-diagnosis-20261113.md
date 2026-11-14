@@ -315,14 +315,17 @@ python scripts/boot_state_transitions.py \
 
 ⇒ 要把 3 条 ktrace 送上机器，需要：① macOS 侧重编 dylib；② 新 CDHash → 内核 trust 重建
 （**kernel_sha 会变，Data 按 seedHash 重建**）；③ 新 dylib 进 Data seed 并重刷 userdata（8.4 GB / 218 s）。
-用户已接受「丢桌面」，但这仍是 **Compose 全流程 + Data 重刷**，不是「一次 workflow_dispatch + fastboot boot」。
+代价已在 2026-11-14 08:22 由用户原话确认（「丢桌面可以接受」，并在随后的选路里选了 B1）；
+但这仍是 **Compose 全流程 + Data 重刷**，不是「一次 workflow_dispatch + fastboot boot」。
+代价确认 ≠ 结果已知：是否真的重建 Data，要由 §12 的实机实验回答，不能由文档推断。
 
 ### 可替代的纯内核路径
 
 现有的 `PICASSO_STACKSHOT` 只能导出**已经完成的 panic stackshot**
 （`picasso-usb-console-xnu.patch:2459` 注释原文），没有「运行中按需 stackshot」的入口。
 若要问「停住时 backboardd 卡在哪」，需要新写一个「fence 停住 N 秒 → 抓 stackshot」的内核探针：
-只改内核、不碰 dylib/trust/Data 镜像，但仍会改 kernel_sha（桌面重建，用户已接受）。
+只改内核、不碰 dylib/trust/Data 镜像；kernel_sha 会变，但**是否导致 Data 重建仍是推断**（见 §12），
+必须用真机实验判定，不能写成结论。
 
 两条路都要一次真实构建。**在选路之前不再出包**——这是本轮唯一未决的事。
 
