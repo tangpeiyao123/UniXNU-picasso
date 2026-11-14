@@ -121,6 +121,21 @@ S03 的第 11 个检查点之后就再没有 EAGL 调用。
 **分叉点的精确表述**：backboardd 停在第 1 个 AGX 客户端之后，
 **第 2 个 `IOServiceOpen(AGXAccelerator)`（PASS 里在 texk 前 5 行）从未发生**。
 
+#### 3.2.0 但要收窄：这不是 NO_DRAWABLE 独有的因果
+
+把 `070546` 里所有 PASS 与 `AFTER_DRAWABLE` 会话按同样三项计数：
+
+| 类别 | 会话 | AGXAccelerator 匹配 | FBUC call | texk | 帧 |
+|---|---|---|---|---|---|
+| PASS | S01/02/03/09/12/14/17/18/20/21/22/23/25/26/27/30/34/43 | **3** | 160–284 | 1 | >0 |
+| AFTER_DRAWABLE | S05/07/11/24/31 | **2** | 19–21 | 1 | 0 |
+| NO_DRAWABLE（日志 B） | S46/48 | **2** | ~19 | 0 | 0 |
+
+⇒ 「少一次 AGX 打开、FBUC 只到 ~19」是**所有提前停住的会话共有的现象**，
+不是 NO_DRAWABLE 特有的原因。它把「停住」定位到「backboardd 建立第一套渲染客户端之后没多久」，
+但**不能**用来区分 NO_DRAWABLE 与 AFTER_DRAWABLE——两者的唯一差别是首块 IOSurface 有没有 attach。
+这也是为什么下一步必须是探针，而不是继续在日志里找差异。
+
 ### 3.2.1 为什么不能再说「更具体」
 
 `-texImageIOSurface:` 的包装在早退分支上会 `say("hakios-gl: … not done")`，但
@@ -271,3 +286,35 @@ python scripts/boot_state_transitions.py \
 4. 若探针证明是 `texture == 0` 早退：那问题在「调用方没有先绑定纹理」，方向转向
    CA/GL 的 drawable 建立顺序，而不是 EAGL 包装。
 
+
+---
+
+## 10. B 指令的可行性核查：探针不在内核里（评审问题 1 的回答）
+
+评审问「eagl.c 补 ktrace 编进哪个产物、kernel_sha 会不会变」。实查结论：**编不进内核，
+但也因此需要三步才上得了机器**，不是一次 CI 出包能做完的。
+
+证据链：
+
+1. **eagl.c 是用户态库**：镜像 `4a6a853d.img` 里 `eagl macroctx` / `texk IOSurface attached`
+   各 0 次，而 `PICASSO_GPU text:` 1 次 —— 文本经内核转发，但产生文本的代码在用户态。
+2. **它的产物是 `libpicasso-sb.dylib`**：`scripts/build-picasso-sb-inject.py` 用
+   **macOS 的 iPhoneOS SDK** 编译并 ad-hoc 签名（`xcrun --sdk iphoneos`）。
+3. **Linux CI 只复用、不重建**：`scripts/picasso_linux_inputs.py:19` 把
+   `libpicasso-sb.dylib` 列为**输入**，`:125` 要求 macOS Data seed 里的库 sha256 与审计值一致。
+4. **信任是内核里的**：`prepare-picasso-ui-trust.py` 把新库的 CDHash 加进内核 trust bundle；
+   `configs/picasso-trust-compat.json` 明写「Data seed 保留卷首次建立时写入的那份副本，
+   **重建 libpicasso-sb.dylib 永远不会更新它**」。
+
+⇒ 要把 3 条 ktrace 送上机器，需要：① macOS 侧重编 dylib；② 新 CDHash → 内核 trust 重建
+（**kernel_sha 会变，Data 按 seedHash 重建**）；③ 新 dylib 进 Data seed 并重刷 userdata（8.4 GB / 218 s）。
+用户已接受「丢桌面」，但这仍是 **Compose 全流程 + Data 重刷**，不是「一次 workflow_dispatch + fastboot boot」。
+
+### 可替代的纯内核路径
+
+现有的 `PICASSO_STACKSHOT` 只能导出**已经完成的 panic stackshot**
+（`picasso-usb-console-xnu.patch:2459` 注释原文），没有「运行中按需 stackshot」的入口。
+若要问「停住时 backboardd 卡在哪」，需要新写一个「fence 停住 N 秒 → 抓 stackshot」的内核探针：
+只改内核、不碰 dylib/trust/Data 镜像，但仍会改 kernel_sha（桌面重建，用户已接受）。
+
+两条路都要一次真实构建。**在选路之前不再出包**——这是本轮唯一未决的事。
