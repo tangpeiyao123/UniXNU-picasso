@@ -1,0 +1,11 @@
+A(2-31) idles 5 s
+A  n=30 valid=30  armed=16  frame=13  SEED=6  NO_DRAWABLE=4  AFTER_DRAWABLE=3  NO_GL=0  SILENT=1  TRUNC=0
+   stalls: texk=[1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0] agx=[2, 2, 0, 2, 2, 0, 0, 2, 0, 2, 2, 2, 0, 0] fbuc_max=21
+B(33-47) idles 300 s
+B  n=15 valid=14  armed=7  frame=5  SEED=4  NO_DRAWABLE=0  AFTER_DRAWABLE=3  NO_GL=0  SILENT=0  TRUNC=1
+   stalls: texk=[1, 0, 0, 1, 1, 0, 0] agx=[2, 0, 0, 2, 2, 0, 0] fbuc_max=21
+
+Fisher two-sided (valid sessions only, TRUNC excluded):
+  frame-PASS  A 13/30  B 5/14  p=0.748
+  SEED        A 6/30  B 4/14  p=0.701
+  NO_DRAWABLE A 4/30  B 0/14  p=0.290
