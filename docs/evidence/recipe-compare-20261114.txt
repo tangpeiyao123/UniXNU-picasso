@@ -1,0 +1,7 @@
+# recipe comparison 2026-11-14T10:00 (run 43543793556, job 132290187723, sha fbd40f1)
+archived  k30i-ios/boot/linux-inputs/manifest.json recipe_sha256 = b5fc7d559c3ab0dd1c7fee9fe46674b50457772c63321f01ace72498de5a2832
+current   RECIPE_KEY                                       = 3889f90295cde42b6d17657f5b9790cca0c6fbf61c7bad4dc6b43d5913a48edd
+verdict   MISMATCH -> the archived bundle cannot satisfy reuse() for this tree (B path is dead as-is)
+
+# local archive integrity (independent sha256 pass, 2026-11-14T09:58): 7/7 OK
+# recipe() includes board payload settings (kernel_args), which changed since 2026-11-07; that is why the old bundle no longer matches.
