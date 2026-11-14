@@ -103,18 +103,34 @@ if(native_ram_block_ready!=1) return 0;                          // -> ENOENT ->
 **分叉点 = `eagl.c` 的 `-texImageIOSurface:` 包装**（`note_format("IOSurface attached", …)`，eagl.c:4514）。
 S03 的第 11 个检查点之后就再没有 EAGL 调用。
 
-### 3.2 卡在哪个调用之前
+### 3.2 卡在哪个调用之前（调用级，行号取自 logs2/stall-03.txt）
 
-- 最后一条 EAGL 调用是 `getMacroContextPrivate`（对应 #11 `eagl macroctx`），**返回了非空 table**；
-- 之后 S03 立刻做了 `IOCoreSurfaceRoot` 查找：`PICASSO_IOKIT end … rpc=0 result=0 object=1` —— **服务打开成功**；
-- 但整段日志里 `*urface` 只出现 **1 次**（就是上面这条查找），**没有任何 IOSurface 分配/绑定**；
-  对照 S11 有 13 次（2 次 texk attach/show + SpringBoard 的 IOSurfaceRoot 查找）。
-- 期间 backboardd 没有死：它继续做 IOKit、FBUC（`call=10 selector=12 ret=0`、WLED power=1）、brightness，
-  SpringBoard 也起来了（106 行）。
+| 行 | S03（STALL） | S11（PASS） |
+|---|---|---|
+| 1854–1857 | `IOCoreSurfaceRoot` 查找，`rpc=0 result=0 object=1`（**成功**） | 同（成功） |
+| 1912–1913 | `PICASSO_FBUC call=15 selector=50` → `done=15 ret=e00002c7` | 同 |
+| 1915–1916 | `AGXAccelerator` **第 1 次**用户客户端打开（`sample=10`，thread 709，`result=0 object=1`） | 第 1 次在 1970（thread 754），`result=0 object=1` |
+| — | **没有第 2 次** | 1978 `AGXAccelerator` **第 2 次**打开（`sample=11`，thread 767） |
+| — | **没有 `FBUC call=16`**（backboardd 序列停在 15；16/17 属于另一个进程 `CollectionsPoste`） | 1981 `FBUC call=16 selector=68` |
+| — | **没有 `texk IOSurface attached`** | 1983 `texk IOSurface attached … 1080x2400` |
 
-⇒ 结论只写到这里：**卡在「用户态拿到 IOSurface 并调用 texImageIOSurface」之前**，
-具体是「surface 没被创建」还是「创建了但没送到 GL」，现有日志分不开——
-内核侧没有 IOSurface 外部方法的探针。要分，只能加诊断（见 §6）。
+第 1916 行之后，S03 剩余 **1748 行里没有任何一行**含 `gl` / `texture` / `surface` / `eagl` / `drawable`
+（`awk 'NR>1915' logs2/stall-03.txt | grep -i …` 为空）。
+期间 backboardd 没有死：继续做 IOKit、brightness、WLED，SpringBoard 也起来了。
+
+**分叉点的精确表述**：backboardd 停在第 1 个 AGX 客户端之后，
+**第 2 个 `IOServiceOpen(AGXAccelerator)`（PASS 里在 texk 前 5 行）从未发生**。
+
+### 3.2.1 为什么不能再说「更具体」
+
+`-texImageIOSurface:` 的包装在早退分支上会 `say("hakios-gl: … not done")`，但
+**`say()` 不走串口**（全段 `hakios` 命中 = 0，S03 和 S11 都是 0），所以看不到返回值。
+因此「调用发生了但 `texture==0`/`image_new==NULL` 早退」与「根本没调用」这两种情况，
+现有日志**分不开**。要分只能加探针（见 `patches/held/NO-DRAWABLE-probe.md`）。
+
+另外更正一条评审意见：`eagl.c` **在仓库里**（`git ls-files` 有 `drivers/NativeGL/eagl/eagl.c`），
+4514 行就是 `note_format("IOSurface attached", …)`，是源码行号、不是解码符号位置，
+所以将来要改的确实是这个文件（冻结令解除后）。
 
 ### 3.3 fence 是下游
 
@@ -185,8 +201,73 @@ S04/S08（PASS 早停）：fence 停在 21。所以 **19 只是「初始化后�
 | 文件 | 改动 |
 |---|---|
 | `scripts/measure_desktop_reach.py` | `frames/eagl/texk` 三列；按阶段分型（SEED / NO_DRAWABLE / NO_GL / AFTER_DRAWABLE / SILENT）；`TRUNCATED_BY_HOST` 判定与双分母；`--window` |
+| `scripts/boot_state_transitions.py` | 新增：状态序列 + 上一段→下一段矩阵 + Fisher 检验（复用 measure 的切分与判定） |
 | `scripts/reproduce_desktop.py` | `--min-frames`（默认 0，不改旧行为）；`<cmd-file>.lock` 单实例锁 |
 | `k30i-ios/console_recorder.py` | 端口掉线写 `CAPTURE GAP BEGIN`，重连写 `CAPTURE GAP END gap_s=`；停止时若仍在 gap 内写 `CAPTURE GAP OPEN AT STOP`。日志句柄本就是 `buffering=0`，主机侧字节不丢；**设备在断线期间打印的内容无法回填**（没有重放通道），所以只标记窗口，供下游判「未观测」而不是「静默」 |
 
 验证：`py_compile` 三个文件 `RC=0`；`measure` 实跑 `RC=0`；gap 标记用临时日志跑过（begin 幂等、end 带时长、停止时告警）；
-锁用两个进程实测（第二个 `RC=2`）。
+锁用两个进程实测（第二个 `RC=2`）；`boot_state_transitions.py` 实跑 `RC=0`。
+
+---
+
+## 8. 全量历史（三份带 banner 的日志，59 段）与状态转移
+
+```
+python scripts/boot_state_transitions.py \
+  --log D:/k30i-gpu/console/console-20261113-061914.log \
+  --log D:/k30i-gpu/console/console-20261113-070546.log \
+  --log D:/k30i-gpu/console/console-20261113-220343.log     # RC=0
+```
+
+覆盖：`061914` 5 段、`070546` 43 段、`220343` 11 段 = **59 段**。
+其余 `session-*.log` 只有 1 个 banner（单段碎片），未计入。
+
+| 状态 | 次数 | 占比 |
+|---|---|---|
+| PASS（显示管线 armed + UI 起） | 22 | 37.3% |
+| STALL_SEED | 17 | 28.8% |
+| STALL_SILENT | 7 | 11.9% |
+| STALL_AFTER_DRAWABLE（texk 有、0 帧） | 6 | 10.2% |
+| STALL_NO_DRAWABLE | 4 | 6.8% |
+| STALL_NO_GL | 2 | 3.4% |
+| TRUNCATED_BY_HOST | 1 | — |
+
+**NO_DRAWABLE 不是固定比率**：`070546` 2/43 = 4.7%，`220343` 2/11 = 18.2%，`061914` 0/5。
+样本小，只能说「随日志/阶段漂移」，不能给稳定比例。
+`AFTER_DRAWABLE`（画到了但没出帧）6 次里 5 次在 `070546`、1 次在 `061914`，
+`220343` 一次都没有——它说明「attach 成功」也不是充分条件，比 NO_DRAWABLE 更值得留意。
+
+**状态转移（56 次转移，合并三份）**
+
+| 上一段 \ 下一段 | AFTER | NO_DRAW | NO_GL | PASS | SEED | SILENT | TRUNC |
+|---|---|---|---|---|---|---|---|
+| AFTER_DRAWABLE | 0 | 0 | 0 | 2 | 4 | 0 | 0 |
+| NO_DRAWABLE | 0 | **0** | 0 | 2 | 1 | 1 | 0 |
+| NO_GL | 0 | 0 | 0 | 1 | 0 | 1 | 0 |
+| PASS | 2 | 3 | 1 | 8 | 5 | 0 | 0 |
+| SEED | 4 | **1** | 0 | 6 | 4 | 2 | 0 |
+| SILENT | 0 | 0 | 1 | 1 | 2 | 3 | 0 |
+| TRUNC | 0 | 0 | 0 | 0 | 1 | 0 | 0 |
+
+- `P(NO_DRAWABLE | 上一段 SEED) = 1/17 = 5.9%`
+- `P(NO_DRAWABLE | 上一段 PASS) = 3/19 = 15.8%`
+- **Fisher 精确检验双侧 p = 0.605** ⇒ **没有状态依赖证据**；方向还与「SEED 残留态更容易 NO_DRAWABLE」相反。
+- `NO_DRAWABLE → NO_DRAWABLE = 0/4`：这一类不自我延续。
+
+结论：**NO_DRAWABLE 不是「上次 SEED panic 留下的 Data 残留」造成的**（至少这批数据不支持），
+按独立故障处理，不要和 SEED 混进同一版改动。
+
+## 9. 下一版（NO_DRAWABLE）最小补丁思路 —— 只写建议，未改代码
+
+已落到 `patches/held/NO-DRAWABLE-probe.md`。要点：
+
+1. **先探针，不改行为**：在 `my_texImageIOSurface` 入口加一条 `ktrace`，打出
+   `surface` 是否 NULL、`target`、绑定到的 `texture`、`image_new` 是否成功、返回 YES/NO。
+   现在 `say()` 不走串口，等于这个函数是黑盒；加一条 ktrace 就能把 §3.2.1 的两种可能分开。
+2. **不要**先做「跳过已成功的 surface-root 查找」这类改动：surface-root 查找在 S03 里
+   `result=0 object=1` 已经成功，跳过它不会改变任何事。
+3. **不要**先做重试：目前没有任何证据表明 `texImageIOSurface` 被调用过并失败，
+   重试一个没被调用的函数是空转。
+4. 若探针证明是 `texture == 0` 早退：那问题在「调用方没有先绑定纹理」，方向转向
+   CA/GL 的 drawable 建立顺序，而不是 EAGL 包装。
+
