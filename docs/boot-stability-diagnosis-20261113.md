@@ -325,3 +325,28 @@ python scripts/boot_state_transitions.py \
 只改内核、不碰 dylib/trust/Data 镜像，但仍会改 kernel_sha（桌面重建，用户已接受）。
 
 两条路都要一次真实构建。**在选路之前不再出包**——这是本轮唯一未决的事。
+
+---
+
+## 11. `panic-test` 抓栈：负结果（2026-11-14 08:47 实机）
+
+在 SEED stall 中（banner 08:45:50，`provider=ram` 已打印、`done stage=4` 未打印）经 CDC 发 `panic-test`：
+
+```
+panic(cpu 7 caller 0xfffffff007ca459c): PICASSO CDC PANIC TEST: synchronous panic capture is active @picasso_usb.c:2681
+Panicked task 0xfffffff4ec79f010: 0 pages, 75 threads: pid 0: kernel_task
+Panicked thread: 0xfffffff4064a64a0, backtrace: …, tid: 155      ← CDC poller
+PICASSO_STACKSHOT begin v=1 bytes=8565 …
+```
+
+**结论：这条路拿不到卡住线程的栈。** panic 发生在发命令的 CDC poller（kernel_task tid 155），
+导出的 8.5 KB kcdata 只覆盖这个线程 + 内核元数据（重组后 8565 B、没有任何线程名，
+`backboardd`/`SpringBoard` 命中 0）——不是全任务 stackshot。
+
+⇒ B1 不能靠现成命令省掉构建：要拿 backboardd / ram-block worker 的栈，必须新增
+「对指定进程的所有线程抓栈」的内核代码（`stackshot` 请求或逐线程 pc/lr + 内核栈回溯）。
+
+顺带两个实机确认：
+- **CAPTURE GAP 生效**：重启后日志出现 `CAPTURE GAP END … gap_s=72.0`，断线时长可读。
+- **回滚锚点 device 半边**：`partition-size:boot=0x8000000`、`partition-size:userdata=0x1AC2BFB000`、
+  `partition-type:boot=raw`、`anti=1`、无 `current-slot`（单槽），`hard_fail=0`。
