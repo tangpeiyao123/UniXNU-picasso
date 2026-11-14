@@ -154,9 +154,17 @@ def cmd_device():
 
     vals = {}
     for line in text.splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            vals[k.strip()] = v.strip()
+        line = line.strip()
+        if line.startswith("(bootloader)"):
+            line = line[len("(bootloader)"):].strip()
+        # "partition-size:boot: 0x8000000" and "partition-type:boot:raw" — the key
+        # itself contains a colon and the value is not always space-separated, so
+        # split on the last colon either way.
+        sep = ": " if ": " in line else ":"
+        if sep not in line:
+            continue
+        k, _, v = line.rpartition(sep)
+        vals[k.strip()] = v.strip()
     bad = 0
     for key, want in EXPECT.items():
         got = vals.get(key)
@@ -177,8 +185,10 @@ def cmd_device():
         bad += 0 if ok else 1
     slot = vals.get("current-slot") or vals.get("slot") or "(absent: single slot)"
     item("INFO", "current-slot", True, slot)
-    ab = vals.get("anti-rollback") or vals.get("rollback-index") or "(not reported)"
-    item("INFO", "anti-rollback", True, ab)
+    # This bootloader reports the rollback index as plain "anti", not
+    # "anti-rollback"; keep all three spellings so a renamed key is visible.
+    ab = vals.get("anti-rollback") or vals.get("rollback-index") or vals.get("anti")
+    item("INFO", "anti-rollback", True, ab if ab is not None else "(not reported)")
     item("WARN", "boot readback", False,
          "bootloader has no fastboot fetch (usb-console-bringup.md:106); getvar + host flash record only")
     return bad
