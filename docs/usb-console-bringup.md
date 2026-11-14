@@ -199,3 +199,110 @@ The board defaults now enable the console without holding boot. For diagnostic
 runs that need to park at `bsd_init`, append `picasso_usb_hold=1`.
 
 No partition was flashed, erased, or formatted. Use `fastboot boot` only.
+
+## 2026-11-13 correction: capture-gate criteria (reviewer error, recorded here)
+
+The 05:0x review round proposed two "hard criteria" for the console recorder.
+Re-reading the code showed **both were wrong**. This section is the correction;
+it is written into the file because a verdict given only in chat does not count.
+
+### 1. `grep "SESSION host=" console-*.log` can never return a hit
+
+`k30i-ios/console_recorder.py` (mtime 2026-11-13 04:56:27) writes only these
+stamped kinds: `RECORDER START`, `PORT UNAVAILABLE`, `PORT OPEN`,
+`KERNEL BANNER`, `PANIC MARKER`, `SILENT`, `PORT CLOSED`, `RECORDER STOP`.
+The literal `SESSION host=` appears **once, in the module docstring** (line 15),
+never in a `stamp(...)` call. So a zero-hit grep is a doc/implementation
+mismatch, **not** evidence that the recorder missed a session. The advertised
+read-back command must use `RECORDER START` / `KERNEL BANNER`.
+
+### 2. WITHDRAWN: "no `PORT OPEN` before boot => refuse to boot"
+
+COM3 is the **kernel-side CDC-ACM gadget** (`USB\VID_1209&PID_0001\PICASSO01`).
+Before the kernel starts, the phone is in fastboot (VID 18d1) and that CDC
+device does not exist. Demanding `PORT OPEN` *before* `fastboot boot` would
+block every boot. Three independent confirmations:
+
+- This document, Windows section: `capture-logs.cmd` is started "before booting
+  the phone" and then **waits** for VID 1209 / PID 0001 to appear.
+- `boot_capture.py:165-166`: `boot(args.image)` then `capture(...)`, whose
+  `wait_port=90.0` loop polls for the port and reports `COM3 未出现（UEFI 拒绝 /
+  内核没起来）` on timeout.
+- `boot_and_capture.py:36-70`: starts a reader thread that reconnects while the
+  port is absent, sleeps 1 s, then runs the real gates
+  (`fix_data_uuid --verify`, `preflash_gate`) and only then boots. The gates are
+  image/UUID checks, **not** a `PORT OPEN` check.
+
+### 3. "read 6 s of log to get the banner" after a PC reboot is impossible
+
+`Darwin Kernel Version` is emitted once at kernel start. Measured counts:
+`run-M3-retry.log` 1, `run-M4-retry2.log` 1, `run-M5-retry3.log` 1,
+`run-D1-warm.log` 1 (`run-M2-trust5.log` 3 = three separate sessions).
+The 04:51:52 boot's banner was never captured (the port was down); rebooting
+the **PC** does not make the phone print it again. Getting a banner requires a
+**phone** reboot, which ends the current `fastboot boot` session.
+
+### Correct criteria (NOT YET IMPLEMENTED as of 05:22)
+
+1. Start the recorder before the boot command; it keeps reconnecting in the
+   background while the port is absent. That is a precondition on the recorder,
+   not a gate on the boot.
+2. After the boot command, require `PORT OPEN` **and** `KERNEL BANNER` within N
+   seconds; otherwise classify the run as `SESSION_NOT_CAPTURED` — do not claim
+   which kernel was running, and do not retroactively "fix" it by reading 6 s.
+3. Distinguish "port absent before boot" (expected) from "port never appears
+   after boot" (failure). These are different states and need different stamps.
+4. pyserial's `Serial.open()` can **hang** without raising on Windows; the
+   current `except Exception` path cannot catch it (`L13108` returned `rc=124`
+   at 25 s with no stdout). A thread-level timeout is still required.
+
+Status: criteria 1-4 are **not written into any script yet**. No `.py`/`.ps1`
+under `repo-work` or `k30i-ios` was modified after 05:05 on 2026-11-13. A
+verbal promise to add a gate is not a gate.
+
+### Control worth keeping
+
+`run-M3-retry.log` is 1,228,800 bytes with a first-line Darwin banner from the
+**same `ca349c0c` image**. So the image does have working USB console; the
+04:51 failure is an intermittent USB/CDC bring-up problem, not a build that
+lacks the console. Report it as such, not as "the device CDC endpoint is dead".
+
+## 05:36 status update (recorded so the section above does not go stale)
+
+- `k30i-ios/console_recorder.py` was rewritten at 05:32: multi-port discovery,
+  a per-port worker, and an 8 s thread-level open timeout are **implemented and
+  really run** (`py_compile` ok; `console-20261113-053302.log` contains
+  `RECORDER START ... open_timeout=8s` and `BLACKLISTED ... COM5`).
+- Criteria 2-3 above are **still absent**: `SESSION_NOT_CAPTURED`,
+  `banner_deadline` and `deadline` all have 0 occurrences in the script; there
+  is no "PORT OPEN + KERNEL BANNER within N s after boot" check. The validation
+  command was `timeout 25 python console_recorder.py ... | head -5` with no
+  `echo rc=$?`, so no exit code was captured (the pipe hides it — the same trap
+  `boot_and_capture.py` already documents).
+- New defect: `blacklist` only grows (`if name in blacklist: continue`). A port
+  that stalls once is never retried for the life of the process, so a USB
+  console that recovers later would still not be captured. Needs an expiry or a
+  re-probe after N rescans.
+- Still **0 kernel bytes / 0 Darwin banners / 0 PORT OPEN** across all three
+  console logs. The recorder is now robust, but the console is still unreadable.
+- Evidence against the `gctl` early-return theory (checked 05:36): all 94 logged
+  `GCTL` values are `0x00102001`, and `(0x00102001 >> 12) & 3 == 2`, i.e. the
+  `picasso_usb_gadget_start()` guard **passes every time**. The string
+  `"not in device mode"` occurs **0 times** in all logs under this tree. That
+  branch has never fired; it cannot explain this failure.
+- PnP shows `COM5 Status OK / CM_PROB_NONE`, instance
+  `USB\VID_1209&PID_0001\PICASSO01`. The gadget therefore **did enumerate** (a
+  failed `gctl` guard calls `picasso_usb_stop_controller()`, whose comment says
+  `RUN_STOP=0` drops D+ so the host sees a disconnect). The observed
+  `ERROR_SEM_TIMEOUT 121` / blocking `open()` points instead at EP0 CDC class
+  control requests not being answered. See the existing
+  `docs/evidence/picasso-cdc-ep0-v12-*.log` (`setup type=21` = CDC class
+  requests, 100 occurrences) and `patches/picasso-cdc-poller-sleep-xnu.patch`
+  (poller switched to a 1 ms timed sleep that depends on timer IRQ delivery and
+  scheduling). Those are the paths to instrument before proposing a register
+  write.
+- `GCTL` bit-field encoding is **not defined** in the patch (only
+  `#define GCTL 0xc110u`). The code requires `((gctl>>12)&3)==2` while its
+  printf calls that "device mode"; the two do not establish what value to write.
+  Do not write GCTL on the strength of a printf string — check the controller
+  TRM first.

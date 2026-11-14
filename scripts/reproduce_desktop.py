@@ -82,6 +82,12 @@ def main():
     ap.add_argument("--cmd-file", default=None,
                     help="when set, PASS and STALL_GPU sessions are soft-rebooted by "
                          "writing 'reboot-fastboot' here (the recorder forwards it)")
+    ap.add_argument("--out-csv", default=None,
+                    help="append one row per attempt, flushed immediately, so the "
+                         "round detail survives the process")
+    ap.add_argument("--charge-pause", type=float, default=0.0,
+                    help="seconds to sit at the desktop (charging) before the reboot "
+                         "that starts the next round; excluded from the wall metric")
     ap.add_argument("--retry-until-pass", type=int, default=0, metavar="N",
                     help="after a non-PASS verdict, reboot and try again until a "
                          "frame-PASS or N attempts; 0 keeps one attempt per cycle")
@@ -127,6 +133,7 @@ def main():
     results = []
     idx = base
     wall = []
+    pause_s = [0.0]
     for cycle in range(1, args.cycles + 1):
         attempts = 0
         round_t0 = None
@@ -168,7 +175,15 @@ def main():
                     break
                 time.sleep(3)
 
-            elapsed = time.time() - round_t0
+            elapsed = time.time() - round_t0 - pause_s[0]
+            if args.out_csv:
+                row = "%d,%d,%s,%s,%s,%d,%d,%.1f,%s\n" % (
+                    cycle, attempts,
+                    time.strftime("%Y-%m-%dT%H:%M:%S"), verdict,
+                    (v if "v" in dir() else ""), vsync or 0, 0, elapsed, "")
+                with open(args.out_csv, "a", encoding="utf-8") as fh:
+                    fh.write(row)
+                    fh.flush()
             print("[%s] cycle %d attempt %d: %s  (vsync=%s desktop=%s panic=%s wall=%.0fs)"
                   % (time.strftime("%H:%M:%S"), cycle, attempts, verdict,
                      vsync, desktop, panic, elapsed), flush=True)
@@ -181,6 +196,21 @@ def main():
             if verdict in ("PASS", "STALL_GPU"):
                 send_reboot()
                 time.sleep(5)
+
+        # A round that ended in a PASS still has to hand the device back: in
+        # retry mode the loop broke out before the reboot, so without this the
+        # next cycle waits for a banner that never comes (19:31-19:46 stall).
+        if args.retry_until_pass > 0 and cycle < args.cycles and verdict in ("PASS", "STALL_GPU"):
+            if args.charge_pause and verdict == "PASS":
+                # A PASS means the device is sitting at the desktop: the only
+                # moment it can take real charge. The pause is counted apart so
+                # it cannot inflate the wall-clock metric.
+                print("[%s]   -> charge pause %.0fs at the desktop"
+                      % (time.strftime("%H:%M:%S"), args.charge_pause), flush=True)
+                time.sleep(args.charge_pause)
+                pause_s[0] += args.charge_pause
+            send_reboot()
+            time.sleep(5)
 
         results.append(verdict)
         wall.append((cycle, attempts, elapsed, verdict))

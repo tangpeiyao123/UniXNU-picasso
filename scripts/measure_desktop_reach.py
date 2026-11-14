@@ -147,11 +147,23 @@ def measure(sessions, all_lines, window=300.0, min_frames=2):
         boot_t = banner_epoch(None, all_lines, start)
         rb_t = reboot_after_banner(seg)
         age = (rb_t - boot_t).total_seconds() if (boot_t and rb_t) else None
-        truncated = bool(verdict == "STALL" and age is not None and age < window)
+        # A host reboot inside the window is only a capture problem when the
+        # host did NOT ask for it (cable drop). When our own harness rebooted
+        # the device, that attempt simply failed: it must stay in the
+        # denominator, otherwise the rate climbs by deleting failures.
+        harness = any("CMD SENT" in l for l in seg)
+        tail_gap = any("CAPTURE GAP BEGIN" in l for l in seg[-25:])
+        truncated = bool(verdict == "STALL" and age is not None and age < window
+                         and tail_gap and not harness)
+        interrupted = bool(verdict == "STALL" and age is not None and age < window
+                           and not truncated)
         last = next((l for l in reversed(seg) if l.strip()), "")
         subtype = detail = ""
         if verdict == "STALL":
             subtype, detail = stall_subtype(seg)
+        if interrupted:
+            subtype = "STALL_ATTEMPT_INTERRUPTED"
+            detail = "host reboot at %.0f s (harness), counted as a failure" % age
         if truncated:
             verdict = "TRUNC"
             subtype = "TRUNCATED_BY_HOST"
