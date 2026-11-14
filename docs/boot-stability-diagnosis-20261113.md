@@ -121,6 +121,13 @@ S03 的第 11 个检查点之后就再没有 EAGL 调用。
 **分叉点的精确表述**：backboardd 停在第 1 个 AGX 客户端之后，
 **第 2 个 `IOServiceOpen(AGXAccelerator)`（PASS 里在 texk 前 5 行）从未发生**。
 
+#### 3.2.00 一个更干净的核内信号：`vsync: kick` 一次都没有
+
+S03 全段只有 **1** 条 vsync 行（`arm timer … armed=0 wanted=0 kicked=0`，显示初始化时），
+**没有任何 `vsync: kick`**；S11 在 `eagl macroctx` 之后约 40 行开始持续 kick（2078/2157/2231…）。
+`kick` 是用户态向显示驱动要 vsync 的请求，所以「零 kick」等于「用户态从没走到要显示节奏那一步」——
+这比 AGX open 次数更干净，而且完全在内核可见范围内。
+
 #### 3.2.0 但要收窄：这不是 NO_DRAWABLE 独有的因果
 
 把 `070546` 里所有 PASS 与 `AFTER_DRAWABLE` 会话按同样三项计数：
