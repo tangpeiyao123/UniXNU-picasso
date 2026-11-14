@@ -82,6 +82,9 @@ def main():
     ap.add_argument("--cmd-file", default=None,
                     help="when set, PASS and STALL_GPU sessions are soft-rebooted by "
                          "writing 'reboot-fastboot' here (the recorder forwards it)")
+    ap.add_argument("--retry-until-pass", type=int, default=0, metavar="N",
+                    help="after a non-PASS verdict, reboot and try again until a "
+                         "frame-PASS or N attempts; 0 keeps one attempt per cycle")
     ap.add_argument("--quiesce", type=float, default=0.0,
                     help="seconds to idle after a verdict before rebooting; the P2 A/B "
                          "variable (0 = current 5 s behaviour)")
@@ -122,55 +125,67 @@ def main():
           % (time.strftime("%H:%M:%S"), base, args.cycles, args.window), flush=True)
 
     results = []
+    idx = base
+    wall = []
     for cycle in range(1, args.cycles + 1):
-        target = base + cycle          # wait for the next banner
-        t0 = time.time()
-        while count_banners(args.log) < target:
-            if time.time() - t0 > args.wait_cycle:
-                print("[%s] cycle %d: no new banner in %.0fs, aborting"
-                      % (time.strftime("%H:%M:%S"), cycle, args.wait_cycle), flush=True)
-                if lock:
-                    os.remove(lock)
-                return 3
-            time.sleep(2)
-
-        seg0 = read_session(args.log, target - 1)
-        seg0 = seg0 if seg0 is not None else []
-        print("[%s] cycle %d: session #%d started" %
-              (time.strftime("%H:%M:%S"), cycle, target), flush=True)
-
-        verdict = None
-        t0 = time.time()
-        while verdict is None:
-            seg = read_session(args.log, target - 1)
-            if seg is None:
+        attempts = 0
+        round_t0 = None
+        while True:
+            attempts += 1
+            idx += 1
+            target = idx
+            t0 = time.time()
+            while count_banners(args.log) < target:
+                if time.time() - t0 > args.wait_cycle:
+                    print("[%s] cycle %d: no new banner in %.0fs, aborting"
+                          % (time.strftime("%H:%M:%S"), cycle, args.wait_cycle), flush=True)
+                    if lock:
+                        os.remove(lock)
+                    return 3
                 time.sleep(2)
-                continue
-            v, vsync, desktop, panic = judge(seg, args.min_frames)
-            if v:
-                verdict = v
-                break
-            if time.time() - t0 > args.window:
-                verdict = "STALL_GPU"
+
+            if round_t0 is None:
+                round_t0 = time.time()
+            seg0 = read_session(args.log, target - 1)
+            seg0 = seg0 if seg0 is not None else []
+            print("[%s] cycle %d attempt %d: session #%d started" %
+                  (time.strftime("%H:%M:%S"), cycle, attempts, target), flush=True)
+
+            verdict = None
+            t0 = time.time()
+            while verdict is None:
+                seg = read_session(args.log, target - 1)
+                if seg is None:
+                    time.sleep(2)
+                    continue
                 v, vsync, desktop, panic = judge(seg, args.min_frames)
+                if v:
+                    verdict = v
+                    break
+                if time.time() - t0 > args.window:
+                    verdict = "STALL_GPU"
+                    v, vsync, desktop, panic = judge(seg, args.min_frames)
+                    break
+                time.sleep(3)
+
+            elapsed = time.time() - round_t0
+            print("[%s] cycle %d attempt %d: %s  (vsync=%s desktop=%s panic=%s wall=%.0fs)"
+                  % (time.strftime("%H:%M:%S"), cycle, attempts, verdict,
+                     vsync, desktop, panic, elapsed), flush=True)
+
+            limit = args.retry_until_pass
+            if verdict == "PASS" or limit <= 0 or attempts >= limit:
                 break
-            time.sleep(3)
+            # STALL_SEED reboots itself; only ask for a host reboot when the
+            # device is still up and needs one.
+            if verdict in ("PASS", "STALL_GPU"):
+                send_reboot()
+                time.sleep(5)
 
         results.append(verdict)
-        print("[%s] cycle %d: %s  (vsync=%s desktop=%s panic=%s)"
-              % (time.strftime("%H:%M:%S"), cycle, verdict, vsync, desktop, panic), flush=True)
-
-        # STALL_SEED panics and reboots on its own. PASS and STALL_GPU need the
-        # soft reboot; both respond because the USB poller keeps running even
-        # while the GPU fence is frozen.
-        if verdict in ("PASS", "STALL_GPU"):
-            # SEED panics reboot themselves; only an explicit reboot waits.
-            if args.quiesce:
-                print("[%s]   -> quiesce %.0fs before reboot" %
-                      (time.strftime("%H:%M:%S"), args.quiesce), flush=True)
-                time.sleep(args.quiesce)
-            send_reboot()
-            time.sleep(5)
+        wall.append((cycle, attempts, elapsed, verdict))
+        print("[%s] cycle %d resolved in %d attempt(s) after %.0fs: %s"
+              % (time.strftime("%H:%M:%S"), cycle, attempts, elapsed, verdict), flush=True)
 
     n_pass = sum(1 for r in results if r == "PASS")
     print("\n=== RESULT ===")
