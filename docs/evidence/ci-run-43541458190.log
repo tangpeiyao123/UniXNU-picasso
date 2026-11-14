@@ -1,0 +1,10 @@
+# CI run 43541458190 (compose-bootimg, gpu72 dc275103, 2026-11-14T01:29Z)
+# url https://github.com/tangpeiyao123/UniXNU-picasso/actions/runs/43541458190
+# job build 132282735545: steps 1-16 success, 17 'Reuse persistent Data seed' FAILED, 18+ skipped
+
+1046:2026-11-14T01:46:07.7494730Z ##[error]    raise ValueError('No compatible iOS16 Compose input bundle is retained. Restore the saved linux-inputs or explicitly create a new seed; existing persiste
+1047:2026-11-14T01:46:07.7602730Z ValueError: No compatible iOS16 Compose input bundle is retained. Restore the saved linux-inputs or explicitly create a new seed; existing persistent Data requires it
+1048:2026-11-14T01:46:07.7638560Z ##[error]Process completed with exit code 1.
+
+# recipe() in scripts/picasso_linux_inputs.py:38 hashes only 7 scripts + 5 springboard/ramdisk files + board payload settings.
+# patches/picasso-usb-console-xnu.patch is NOT part of it, so this failure is not caused by the thread-dump patch.

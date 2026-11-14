@@ -1,0 +1,4 @@
+# fastboot fetch probe 2026-11-14T09:46 (read-only)
+$ fastboot fetch boot /tmp/bootprobe.bin 0 4096
+fastboot: error: Unable to get max-fetch-size. Device does not support fetch command.
+# => not only minidump: the fetch command itself is absent, so no partition can be read back.
