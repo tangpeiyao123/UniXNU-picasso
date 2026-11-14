@@ -50,6 +50,9 @@ jobs:
         run: |
           KEY=$(python3 scripts/picasso_linux_inputs.py key --tree "$UNIXNU_TREE")
           echo "digest=$KEY" >> "$GITHUB_OUTPUT"
+          # Printed so the recipe can be compared with the archived bundle in
+          # k30i-ios/boot/linux-inputs/manifest.json without a second run.
+          echo "RECIPE_KEY=$KEY"
 
       - name: Restore the audited iOS16 Data seeds and signed UI library
         id: inputs_cache
