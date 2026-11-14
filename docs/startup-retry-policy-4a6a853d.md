@@ -10,6 +10,14 @@ python scripts/startup-policy-report.py --log D:/k30i-gpu/console/console-202611
   --a 2-31 --b 33-47
 ```
 
+## 统计口径（剔除规则写在这里，不静默排除）
+
+- 全量 47 段：`measure` 报 PASS 24 / STALL 21 / TRUNC 2；剔除 TRUNC 后 VALID 45，
+  armed 24/45 = 53.3%、frame 18/45 = 40.0%。
+- A/B 只取 banner #2–#31 与 #33–#47：#1 是插线前那半段（会话中途开始，无 banner 起点），
+  #32 是被主机重启截断的那一段（TRUNC）。两段都不属于任何一组，理由即此。
+- 分型（全量，修正后）：SEED 9 / AFTER_DRAWABLE 6 / NO_DRAWABLE 4 / **WATCHDOG 1** / SILENT 1。
+
 ## 结论（一句话）
 
 **静置 300 秒没有提高任何指标，三项 Fisher 检验全部不显著。** 现有镜像下，重启策略不是可用率的杠杆。
@@ -17,10 +25,13 @@ python scripts/startup-policy-report.py --log D:/k30i-gpu/console/console-202611
 | 指标 | A 组（静置 5 s，n=30） | B 组（静置 300 s，n=14 有效） | Fisher 双侧 p |
 |---|---|---|---|
 | frame-PASS（真出帧） | 13/30 = 43.3% | 5/14 = 35.7% | **0.748** |
-| SEED panic | 6/30 = 20.0% | 4/14 = 28.6% | **0.701** |
+| SEED panic | 5/30 = 16.7% | 4/14 = 28.6% | **0.434** |
 | NO_DRAWABLE | 4/30 = 13.3% | 0/14 = 0% | **0.290** |
 
 p 全部远大于 0.05。**"上一次会话被过早打断、journal 未落盘，因此抬高下一次 SEED 率"这个假设被否掉**。
+
+> 修正（2026-11-14 18:5x）：A 组原本报 6 次 SEED，其中 1 次是 `picasso-watchdog: hardware pet rejected @PicassoWatchdog.cpp:128`，
+> 被旧分类器按 `startswith("panic(")` 吞进 SEED。拆分后 **A 组 SEED=5、WATCHDOG=1**，Fisher 由 0.701 变为 **0.434**，结论不变。
 NO_DRAWABLE 从 4 次降到 0 次看起来像改善，但 p=0.29，不能写成有效——n=14 撑不起这个结论。
 
 ## 明细（脚本原样输出）
@@ -40,7 +51,9 @@ B  n=15 valid=14  armed=7   frame=5   SEED=4  NO_DRAWABLE=0  AFTER_DRAWABLE=3  S
 | NO_DRAWABLE | 4 | 0 | 表面改善，p=0.29，**不成立** |
 | AFTER_DRAWABLE（texk 有、0 帧） | 3 | 3 | 比例 10% → 21%，同样不显著 |
 
-所有 STALL 的 `agx` 都是 2（PASS 是 3），`fbuc_max` 都是 21（PASS 160+），
+STALL 段里 `agx` 多为 2（PASS 为 3），`fbuc_max` 多在 19–21 —— 但**不是全部**：
+`fbuc call=` 的最大值有 34（s01、s43）与 38（s47）的个例，也有 PASS 段只到 34（s04）。
+所以只能写"典型值 19–21、与 PASS 的 160+ 量级不同"，不能写"所有"。
 `texk` 只在 AFTER_DRAWABLE 里为 1。这三条与之前两次分析一致，说明**断点位置没变，变的只是有没有走到**。
 
 ## 那么可用率到底是多少

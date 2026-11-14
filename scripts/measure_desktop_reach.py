@@ -105,7 +105,15 @@ def stall_subtype(seg):
     body = "\n".join(seg)
     pan = next((l for l in seg if l.startswith("panic(")), None)
     if pan:
-        return "STALL_SEED", pan
+        # Never key on "panic(" alone: a watchdog panic was counted as a seed
+        # panic for a whole batch before this split (2026-11-14 16:2x, segment
+        # #10 of 111028). Each signature gets its own class, and an unseen one
+        # gets UNKNOWN instead of being absorbed.
+        if "offline scratch Data mount failed" in pan:
+            return "STALL_SEED", pan
+        if "hardware pet rejected" in pan:
+            return "STALL_WATCHDOG", pan
+        return "STALL_UNKNOWN", pan
     if "iBoot didn't extract panic log" in body:
         return "STALL_CRASH_RECOVERY", \
             "iBoot didn't extract panic log from previous session crash"
