@@ -121,7 +121,7 @@ def stall_subtype(seg):
     return "STALL_SILENT", "no UI marker, no panic: boot stopped before SpringBoard"
 
 
-def measure(sessions, all_lines, window=300.0):
+def measure(sessions, all_lines, window=300.0, min_frames=2):
     rows = []
     for idx, seg, start in sessions:
         body = "\n".join(seg)
@@ -132,7 +132,8 @@ def measure(sessions, all_lines, window=300.0):
         frames = body.count("PICASSO_DPU_FRAME")
         eagl = body.count("eagl init gl=")
         texk = body.count("texk IOSurface attached")
-        verdict = "PASS" if (vsync >= 17 and desktop > 0) else "STALL"
+        armed = vsync >= 17 and desktop > 0
+        verdict = "PASS" if armed else "STALL"
         # A reboot the host sent inside the judgement window ended this boot
         # before it could reach a verdict: that is not evidence about the boot.
         boot_t = banner_epoch(None, all_lines, start)
@@ -150,9 +151,13 @@ def measure(sessions, all_lines, window=300.0):
                 age, window)
         elif age is not None:
             detail = (detail + " | " if detail else "") + "rebooted at %.0f s" % age
+        # Armed but never drew: reported apart so the two rates cannot be confused.
+        verdict_frame = ("PASS" if (verdict == "PASS" and frames >= min_frames)
+                         else ("ARMED_ONLY" if verdict == "PASS" else verdict))
         rows.append(dict(n=idx, vsync=vsync, kick=kick, desktop=desktop,
                          panic=panic, frames=frames, eagl=eagl, texk=texk,
-                         verdict=verdict, last=last[:110], age=age,
+                         verdict=verdict, verdict_frame=verdict_frame,
+                         last=last[:110], age=age,
                          subtype=subtype, detail=detail, seg=seg))
     return rows
 
@@ -165,6 +170,9 @@ def main():
                     help="require exactly N PASS sessions, exit 4 if not met")
     ap.add_argument("--stall-dir", default="logs",
                     help="directory to dump each STALL session (default logs/)")
+    ap.add_argument("--min-frames", type=int, default=2,
+                    help="PICASSO_DPU_FRAME lines required for a frame-PASS (one line per "
+                         "30 flips); armed-PASS keeps the old vsync rule")
     ap.add_argument("--window", type=float, default=300.0,
                     help="judgement window: a host reboot earlier than this after "
                          "the banner marks the session TRUNC (default 300 s)")
@@ -175,7 +183,7 @@ def main():
         print("NO_SESSION: no Darwin banner in %s" % args.log)
         return 3
 
-    rows = measure(sessions, lines, args.window)
+    rows = measure(sessions, lines, args.window, args.min_frames)
     n_pass = sum(1 for r in rows if r["verdict"] == "PASS")
     n_trunc = sum(1 for r in rows if r["verdict"] == "TRUNC")
     n_stall = len(rows) - n_pass - n_trunc
@@ -187,12 +195,16 @@ def main():
                r["frames"], r["eagl"], r["texk"], r["verdict"],
                r["subtype"] or "-"))
 
+    n_frame = sum(1 for r in rows if r["verdict_frame"] == "PASS")
     print("\nTOTAL %d sessions  PASS %d  STALL %d  TRUNC %d  pass-rate %.1f%%"
           % (len(rows), n_pass, n_stall, n_trunc, 100.0 * n_pass / len(rows)))
+    print("FRAME-PASS %d/%d = %.1f%%  (armed-PASS requires frames>=%d)"
+          % (n_frame, len(rows), 100.0 * n_frame / len(rows), args.min_frames))
     valid = len(rows) - n_trunc
     if n_trunc:
-        print("VALID %d sessions (TRUNC excluded)  PASS %d  STALL %d  pass-rate %.1f%%"
-              % (valid, n_pass, n_stall, 100.0 * n_pass / valid))
+        print("VALID %d sessions (TRUNC excluded)  armed %d/%d = %.1f%%  frame %d/%d = %.1f%%"
+              % (valid, n_pass, valid, 100.0 * n_pass / valid,
+                 n_frame, valid, 100.0 * n_frame / valid))
     print("PASS = vsync>=17 and desktop>0 (display armed + UI up). It is NOT a"
           " frame count: PASS sessions that were rebooted early show frames=0.")
     n_frames = sum(1 for r in rows if r["frames"])
