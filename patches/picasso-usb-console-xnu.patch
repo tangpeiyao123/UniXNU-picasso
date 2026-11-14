@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3235 @@
+@@ -0,0 +1,3267 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -37,6 +37,8 @@ new file mode 100644
 +#include <sys/systm.h>
 +#include <kern/clock.h>
 +#include <kern/thread.h>
++#include <sys/proc.h>
++#include <kern/task.h>
 +#include <kern/sched_prim.h>
 +#include <machine/machine_routines.h>
 +#include <machine/atomic.h>
@@ -2323,6 +2325,32 @@ new file mode 100644
 +	}
 +}
 +
++/* Read-only thread dump: one line per thread of a process. `continuation` is
++ * the kernel function the thread will resume in, which is enough to tell a
++ * thread blocked on a lock from one parked in mach_msg. */
++static void
++picasso_thread_dump(int pid)
++{
++	proc_t p = proc_find(pid);
++	task_t task;
++	thread_t t;
++	int n = 0;
++	if (p == PROC_NULL) {
++		printf("PICASSO_THREADS pid=%d absent\n", pid);
++		return;
++	}
++	task = proc_task(p);
++	printf("PICASSO_THREADS begin pid=%d\n", pid);
++	queue_iterate(&task->threads, t, thread_t, task_threads) {
++		printf("PICASSO_THREADS t=%d tid=%d state=%d pri=%d ss=%d cont=%p\n",
++		    n++, thread_tid(t), (int)t->state, (int)t->priority,
++		    t->machine.saved_state != NULL, (void *)t->continuation);
++		if (n >= 96) break;
++	}
++	printf("PICASSO_THREADS end count=%d\n", n);
++	proc_rele(p);
++}
++
 +static void
 +ud_process_command(void)
 +{
@@ -2349,6 +2377,10 @@ new file mode 100644
 +		 */
 +		picasso_usb_watchdog_terminal();
 +		ud.panic_pending = true;
++	} else if (ud_command_is(ud.cmd, "threads")) {
++		picasso_thread_dump(50);	/* backboardd on this board */
++	} else if (ud_command_is(ud.cmd, "kthreads")) {
++		picasso_thread_dump(0);		/* kernel_task: ram-block worker */
 +	} else if (ud_command_is(ud.cmd, "reset-test")) {
 +		printf("PICASSO CDC: reset-test requested; draining then reset mode %u\n",
 +		    ud.reset_mode);
