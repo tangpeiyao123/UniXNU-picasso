@@ -1,0 +1,7 @@
+# CI run 43538142836 (gpu72 dc27510, 2026-11-14T01:02:55Z)
+# url https://github.com/tangpeiyao123/UniXNU-picasso/actions/runs/43538142836
+# job kernel_linux 132272051162, failed step 8 'Validate or import matching macOS Compose inputs'
+
+329:2026-11-14T01:04:47.8044131Z ##[error]    raise ValueError('No compatible iOS16 Compose input bundle is retained. Restore the saved linux-inputs or explicitly create a new seed; existing persistent Data requires its exact seed.')
+330:2026-11-14T01:04:47.8055969Z ValueError: No compatible iOS16 Compose input bundle is retained. Restore the saved linux-inputs or explicitly create a new seed; existing persistent Data requires its exact seed.
+331:2026-11-14T01:04:47.8108019Z ##[error]Process completed with exit code 1.

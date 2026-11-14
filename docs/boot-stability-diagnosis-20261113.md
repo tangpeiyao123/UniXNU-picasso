@@ -315,7 +315,7 @@ python scripts/boot_state_transitions.py \
 
 ⇒ 要把 3 条 ktrace 送上机器，需要：① macOS 侧重编 dylib；② 新 CDHash → 内核 trust 重建
 （**kernel_sha 会变，Data 按 seedHash 重建**）；③ 新 dylib 进 Data seed 并重刷 userdata（8.4 GB / 218 s）。
-代价已在 2026-11-14 08:22 由用户原话确认（「丢桌面可以接受」，并在随后的选路里选了 B1）；
+代价已在 2026-11-14 08:28:06 由用户原话确认（转发评审后自行追加「丢桌面可以接受」）；
 但这仍是 **Compose 全流程 + Data 重刷**，不是「一次 workflow_dispatch + fastboot boot」。
 代价确认 ≠ 结果已知：是否真的重建 Data，要由 §12 的实机实验回答，不能由文档推断。
 
@@ -353,3 +353,22 @@ PICASSO_STACKSHOT begin v=1 bytes=8565 …
 - **CAPTURE GAP 生效**：重启后日志出现 `CAPTURE GAP END … gap_s=72.0`，断线时长可读。
 - **回滚锚点 device 半边**：`partition-size:boot=0x8000000`、`partition-size:userdata=0x1AC2BFB000`、
   `partition-type:boot=raw`、`anti=1`、无 `current-slot`（单槽），`hard_fail=0`。
+
+---
+
+## 12. 实机判定：加探针到底会不会丢桌面（待执行）
+
+要回答的不是「新 kernel_sha 会不会改 Data 身份」（那是门禁能算的），而是
+**临时引导一个新内核之后，断电回 4a6a853d，桌面还在不在**。步骤（每步都可回退）：
+
+1. 新镜像 `fastboot boot`（不 flash，boot 分区始终保留 4a6a853d）；
+2. 在 STALL 窗口发 `threads` / `kthreads` 抓线程表；
+3. 长按断电 → 从分区启动回基线；
+4. 记录：是否 panic、Data UUID 是否仍为 `0EBB496E`、`stage` 是否回到 4、屏幕是否还是桌面。
+
+三种结果分别读作：
+- 桌面还在 → 「新 kernel_sha 会让 Data 重建」被证伪，以后构建不再需要「丢桌面」代价；
+- 桌面没了但能重装 → 代价成立，按回滚包恢复（8.4 GB / 218 s）；
+- 连回基线都 panic → 代价比预期更重，停止该类实验并归档。
+
+**这一节目前是计划，不是结果。**
