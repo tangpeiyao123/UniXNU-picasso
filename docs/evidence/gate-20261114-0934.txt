@@ -1,0 +1,26 @@
+== bundle
+manifest: D:/k30i-backup\rollback-manifest.json (11 entries, 2026-11-14T08:30:49)
+  HARD boot-stock                         ok   134217728 B sha=0614705392e38dad
+  HARD boot-ios-current                   ok   86077440 B sha=4a6a853d98b6baee
+  HARD usb-console-SOP                    ok   6548 B sha=83b902ead248a03d
+  HARD device-info                        ok   10885 B sha=f4f86916e7a0a0db
+  HARD ios-userdata-sparse                ok   8380243396 B sha=55e07e6ad01c086f
+  HARD calib-bluetooth.img                ok   1048576 B sha=8517ed83305270ee
+  HARD calib-fsg.img                      ok   8388608 B sha=cdec7b48bd1015a8
+  HARD calib-modem.img                    ok   335544320 B sha=1a64b0271772811e
+  HARD calib-modemst1.img                 ok   8388608 B sha=7e642a7a070eb2ef
+  HARD calib-modemst2.img                 ok   8388608 B sha=d3d8db4b4db4cb1e
+  HARD calib-persist.img                  ok   67108864 B sha=9a56817dca0cc7c7
+== device (read-only getvar)
+  INFO getvar snapshot                    ok   D:/k30i-backup\getvar-20261114-093446.txt
+  HARD partition-size:boot                ok   0x8000000 ()
+  HARD partition-size:userdata            ok   0x1AC2BFB000 ()
+  HARD partition-type:boot                ok   raw
+  INFO current-slot                       ok   (absent: single slot)
+  INFO anti-rollback                      ok   1
+  WARN boot readback                      FAIL bootloader has no fastboot fetch (usb-console-bringup.md:106); getvar + host flash record only
+  WARN EDL firehose                       FAIL MISSING: no rescue if fastboot is unreachable
+
+hard_fail=0 device_fail=0
+EDL=missing -> constraint: no operation that can make fastboot unreachable
+ROLLBACK_READY=1  GATE=PASS  RC=0
