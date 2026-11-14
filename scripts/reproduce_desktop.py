@@ -82,6 +82,9 @@ def main():
     ap.add_argument("--cmd-file", default=None,
                     help="when set, PASS and STALL_GPU sessions are soft-rebooted by "
                          "writing 'reboot-fastboot' here (the recorder forwards it)")
+    ap.add_argument("--quiesce", type=float, default=0.0,
+                    help="seconds to idle after a verdict before rebooting; the P2 A/B "
+                         "variable (0 = current 5 s behaviour)")
     ap.add_argument("--min-frames", type=int, default=0,
                     help="extra PASS condition: PICASSO_DPU_FRAME lines seen (one per 30 "
                          "flips). 0 keeps the armed-only rule; use 2 for a desktop claim, "
@@ -161,6 +164,11 @@ def main():
         # soft reboot; both respond because the USB poller keeps running even
         # while the GPU fence is frozen.
         if verdict in ("PASS", "STALL_GPU"):
+            # SEED panics reboot themselves; only an explicit reboot waits.
+            if args.quiesce:
+                print("[%s]   -> quiesce %.0fs before reboot" %
+                      (time.strftime("%H:%M:%S"), args.quiesce), flush=True)
+                time.sleep(args.quiesce)
             send_reboot()
             time.sleep(5)
 
