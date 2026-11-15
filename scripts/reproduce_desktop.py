@@ -82,6 +82,10 @@ def main():
     ap.add_argument("--cmd-file", default=None,
                     help="when set, PASS and STALL_GPU sessions are soft-rebooted by "
                          "writing 'reboot-fastboot' here (the recorder forwards it)")
+    ap.add_argument("--seed-early-abort", type=int, default=0, metavar="N",
+                    help="after NATIVE_OWNER_DATA, if no PICASSO_DATA_INIT appears within N "
+                         "more lines, record STALL_SEED_EARLY and reboot instead of waiting "
+                         "out the 240 s seed panic")
     ap.add_argument("--out-csv", default=None,
                     help="append one row per attempt, flushed immediately, so the "
                          "round detail survives the process")
@@ -165,6 +169,13 @@ def main():
                 if seg is None:
                     time.sleep(2)
                     continue
+                if args.seed_early_abort > 0:
+                    di = max((k for k, line in enumerate(seg)
+                              if "NATIVE_OWNER_DATA" in line), default=None)
+                    if di is not None and (len(seg) - di) > args.seed_early_abort \
+                            and not any("DATA_INIT" in l for l in seg[di:]):
+                        verdict, vsync, desktop, panic = "STALL_SEED_EARLY", 1, 0, 0
+                        break
                 v, vsync, desktop, panic = judge(seg, args.min_frames)
                 if v:
                     verdict = v
@@ -177,12 +188,16 @@ def main():
 
             elapsed = time.time() - round_t0 - pause_s[0]
             if args.out_csv:
-                row = "%d,%d,%s,%s,%s,%d,%d,%.1f,%s\n" % (
-                    cycle, attempts,
-                    time.strftime("%Y-%m-%dT%H:%M:%S"), verdict,
-                    (v if "v" in dir() else ""), vsync or 0, 0, elapsed, "")
+                fr = sum(1 for l in seg if "PICASSO_DPU_FRAME" in l)
+                new_file = not os.path.exists(args.out_csv) or os.path.getsize(args.out_csv) == 0
                 with open(args.out_csv, "a", encoding="utf-8") as fh:
-                    fh.write(row)
+                    if new_file:
+                        fh.write("cycle,attempt,banner_t,verdict,subtype,vsync,frames,wall_s,note\n")
+                    fh.write("%d,%d,%s,%s,%s,%d,%d,%.1f,%s\n" % (
+                        cycle, attempts, time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        verdict, verdict if verdict.startswith("STALL") else "",
+                        vsync or 0, fr, elapsed,
+                        "early_abort" if verdict == "STALL_SEED_EARLY" else ""))
                     fh.flush()
             print("[%s] cycle %d attempt %d: %s  (vsync=%s desktop=%s panic=%s wall=%.0fs)"
                   % (time.strftime("%H:%M:%S"), cycle, attempts, verdict,
