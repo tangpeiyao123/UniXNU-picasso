@@ -1,0 +1,12 @@
+# SEED 早停判据的误杀实测（2026-11-15 15:5x，离线）
+
+判据：段内出现 NATIVE_OWNER_DATA 之后，若再也没有 DATA_INIT -> 判该段为 SEED。
+两种取法：first = 第一条 NATIVE_OWNER_DATA；last = 最后一条（我实现时用的）。
+
+console-20261114-111028.log (47 段)   first TP=9 FP=2 TN=36 FN=0
+console-20261114-111028.log (47 段)   last  TP=9 FP=38 TN=0 FN=0
+console-20261115-140252.log (20 段)   first TP=1 FP=6 TN=13 FN=0
+console-20261115-140252.log (20 段)   last  TP=1 FP=19 TN=0 FN=0
+
+结论：last 取法几乎对所有段误报（38/47、19/20），与实跑 17/17 全部 STALL_SEED_EARLY 吻合；
+first 取法仍有 2/47、6/20 误报，未达到"误杀必须为 0"的上机闸门。
