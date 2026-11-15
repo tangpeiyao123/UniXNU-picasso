@@ -82,6 +82,10 @@ def main():
     ap.add_argument("--cmd-file", default=None,
                     help="when set, PASS and STALL_GPU sessions are soft-rebooted by "
                          "writing 'reboot-fastboot' here (the recorder forwards it)")
+    ap.add_argument("--battery-guard", action="store_true",
+                    help="before each attempt, read the newest PICASSO_BATT line; if the "
+                         "device reports it is not on external power, idle until it is. "
+                         "Pack mV is not usable on this kernel (mv=0, pct=-1)")
     ap.add_argument("--seed-early-abort", type=int, default=0, metavar="N",
                     help="after NATIVE_OWNER_DATA, if no PICASSO_DATA_INIT appears within N "
                          "more lines, record STALL_SEED_EARLY and reboot instead of waiting "
@@ -122,6 +126,13 @@ def main():
                   % (time.strftime("%H:%M:%S"), args.cmd_file, lock_path), flush=True)
             return 2
 
+    def lines_cache():
+        try:
+            with open(args.log, encoding="utf-8", errors="replace") as fh:
+                return fh.read().splitlines()[-4000:]
+        except OSError:
+            return []
+
     def send_reboot():
         """Soft reboot via the kernel's CDC 'reboot-fastboot' command."""
         if not args.cmd_file:
@@ -155,6 +166,25 @@ def main():
                     return 3
                 time.sleep(2)
 
+            if args.battery_guard:
+                waited = 0
+                while True:
+                    batt = None
+                    for line in reversed(lines_cache()):
+                        if "PICASSO_BATT state" in line:
+                            batt = line
+                            break
+                    if batt is None or "powered=1" in batt:
+                        break
+                    if waited == 0:
+                        print("[%s] battery guard: not on external power (%s); idling"
+                              % (time.strftime("%H:%M:%S"), batt.strip()[:80]), flush=True)
+                    time.sleep(60)
+                    waited += 60
+                    if waited >= 3600:
+                        print("[%s] battery guard: still unpowered after 1 h, continuing anyway"
+                              % time.strftime("%H:%M:%S"), flush=True)
+                        break
             if round_t0 is None:
                 round_t0 = time.time()
             seg0 = read_session(args.log, target - 1)
