@@ -55,3 +55,24 @@ python3 scripts/reproduce_desktop.py --log <new.log> --cycles 10 --retry-until-p
 
 CSV 的 `frames` 列恒为 0——写行时硬编码了，没取实际值。`verdict` 由 `judge()` 给出（PASS 即 frames≥2），
 所以结论不受影响，但该列不可用，修好前不要引用。
+
+
+---
+
+## 附录 C｜SEED 早停：实现取错锚点，判据本身可用（2026-11-15 17:0x 更正）
+
+首版实现取 **最后一条** `NATIVE_OWNER_DATA` 并看到段尾，导致 17/17 次尝试全部 `STALL_SEED_EARLY`，
+该批数据作废（`docs/evidence/retry-seedabort-INVALID_HOST_BUG.csv`）。
+
+**这是实现错误，不是判据错误。** 正确规则是：**第一条** `NATIVE_OWNER_DATA` 之后的 **200 行窗口**内
+没有 `DATA_INIT`。闸门脚本 `scripts/check_seed_abort_gate.py` 在三份日志（47+28+20 段）实跑：
+
+```
+111028  segs=47 fire=10 true_seed=9 false_kill=0 other_stall=1 missed_seed=0
+094709  segs=28 fire=10 true_seed=10 false_kill=0 other_stall=0 missed_seed=0
+140252  segs=20 fire= 7 true_seed= 1 false_kill=0 other_stall=6 missed_seed=0
+GATE=PASS  RC=0
+```
+
+误杀口径按产品定义：**只有"本会 frame-PASS 却被早停"才算误杀**；早停一个本来也会 STALL 的段不损失可用率。
+`other_stall`（非 SEED 的失败段被早停）单列，不计入误杀。

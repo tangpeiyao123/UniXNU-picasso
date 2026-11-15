@@ -170,12 +170,17 @@ def main():
                     time.sleep(2)
                     continue
                 if args.seed_early_abort > 0:
-                    di = max((k for k, line in enumerate(seg)
-                              if "NATIVE_OWNER_DATA" in line), default=None)
-                    if di is not None and (len(seg) - di) > args.seed_early_abort \
-                            and not any("DATA_INIT" in l for l in seg[di:]):
-                        verdict, vsync, desktop, panic = "STALL_SEED_EARLY", 1, 0, 0
-                        break
+                    # FIRST occurrence only, and only the next N lines: reading to
+                    # the end of the segment fires on almost everything, because
+                    # DATA_INIT is printed early and the mount lines repeat later
+                    # (that implementation error made 17/17 attempts abort).
+                    di = next((k for k, line in enumerate(seg)
+                               if "NATIVE_OWNER_DATA" in line), None)
+                    if di is not None and len(seg) > di + args.seed_early_abort:
+                        window = seg[di + 1: di + 1 + args.seed_early_abort]
+                        if not any("DATA_INIT" in l for l in window):
+                            verdict, vsync, desktop, panic = "STALL_SEED_EARLY", 1, 0, 0
+                            break
                 v, vsync, desktop, panic = judge(seg, args.min_frames)
                 if v:
                     verdict = v
@@ -208,14 +213,15 @@ def main():
                 break
             # STALL_SEED reboots itself; only ask for a host reboot when the
             # device is still up and needs one.
-            if verdict in ("PASS", "STALL_GPU"):
+            if verdict in ("PASS", "STALL_GPU", "STALL_SEED_EARLY"):
                 send_reboot()
                 time.sleep(5)
 
         # A round that ended in a PASS still has to hand the device back: in
         # retry mode the loop broke out before the reboot, so without this the
         # next cycle waits for a banner that never comes (19:31-19:46 stall).
-        if args.retry_until_pass > 0 and cycle < args.cycles and verdict in ("PASS", "STALL_GPU"):
+        if args.retry_until_pass > 0 and cycle < args.cycles and verdict in (
+                "PASS", "STALL_GPU", "STALL_SEED_EARLY"):
             if args.charge_pause and verdict == "PASS":
                 # A PASS means the device is sitting at the desktop: the only
                 # moment it can take real charge. The pause is counted apart so
