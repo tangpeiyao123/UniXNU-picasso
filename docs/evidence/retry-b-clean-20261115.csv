@@ -1,3 +1,4 @@
+cycle,attempt,banner_t,verdict,subtype,vsync,frames,wall_s,note
 1,1,2026-11-15T09:52:53,STALL_SEED,STALL_SEED,1,0,246.2,
 1,2,2026-11-15T09:59:04,PASS,PASS,17,0,617.8,
 2,1,2026-11-15T10:03:29,PASS,PASS,17,0,159.3,
