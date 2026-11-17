@@ -44,7 +44,7 @@ jobs:
         shell: bash --noprofile --norc -e -o pipefail {0}
         working-directory: device
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - name: Check out the picasso device repo
         uses: actions/checkout@v4
