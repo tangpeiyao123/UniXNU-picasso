@@ -1,0 +1,20 @@
+# Upstream seed artifacts: what volume UUID do they carry? (read-only, 2026-11-18 07:0x)
+
+Every seed-class artifact was downloaded and its seed.json / data-audit.json /
+seed-bundle.json read for volume_uuid.
+
+artifact                       id            run/commit        volume_uuid
+picasso-data-seed-190          13945827441   d627aa63 (11-12)  219442C4-8B1A-4910-BCF4-55C21B647AD3
+picasso-generated-data-seed-1  13806114453   35ba40fd (11-10)  219442C4-8B1A-4910-BCF4-55C21B647AD3
+
+our device's Data volume UUID (from the 4a6a853d logs): 0EBB496E-FB09-4223-991E-22007B6FACD1
+
+VERDICT: none of the upstream seeds carries 0EBB496E. Reusing an existing
+seed_artifact_id therefore cannot preserve the current Data identity:
+a compose run with create_data_seed=false + one of these ids would produce an
+image expecting volume 219442C4, and our partition holds 0EBB496E (now partially
+overwritten anyway, see the 11-17 incident).
+
+So preserving identity is not possible with what upstream publishes. The honest
+statement is: a new seed rebuilds Data, which the user already authorised on
+2026-11-14 08:28 and again on 2026-11-17 23:30.
