@@ -1,0 +1,11 @@
+# CI run 44115203670 (compose-bootimg, gpu72 fbd40f13, 2026-11-17T23:31+08:00)
+# url https://github.com/tangpeiyao123/UniXNU-picasso/actions/runs/44115203670
+# inputs create_data_seed=true  fast=false
+# why: the upstream kernel d627aa63 was flashed to the boot partition at 23:16 and
+# panicked at Data mount on our old seed --
+#   panic(cpu 4 caller 0xfffffff00795af04): offline scratch Data mount failed: 2
+#   @kern_exec.c:10060   (ours says 9908 for the same class)
+# so a matching seed has to be minted by Compose before any upstream image can run.
+# expected cost: Data identity 0EBB496E is replaced; user confirmed the desktop is
+# already empty and authorised the rebuild on 2026-11-17 23:30.
+# status at dispatch: queued
