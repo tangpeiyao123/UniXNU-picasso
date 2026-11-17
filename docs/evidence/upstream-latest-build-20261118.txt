@@ -1,0 +1,33 @@
+# Building the upstream tip on our own fork (2026-11-18 07:2x)
+
+## Why this branch exists
+
+The compose chain was proven to work (run 44196788134 on gpu72 is running), but
+gpu72 is 218 commits behind and its compose workflow has no seed_artifact_id.
+Building there only proves the pipeline; it does not carry PR #23/#24.
+
+## Branch and alignment evidence
+
+  git checkout -b upstream-latest-20261118 FETCH_HEAD      (FETCH_HEAD = 39d7908)
+  git rev-list --count HEAD..FETCH_HEAD        -> 0        (identical to upstream tip)
+  grep -c seed_artifact_id compose-bootimg.yml -> 2        (new workflow present)
+  git log -1                                   -> 39d7908 merge: add v2 microphone capture ...
+  one local change: runs-on macos-15 -> macos-latest (upstream pins macos-15, which
+  never got a runner on this fork; macos-latest did, see fork-runner-probe)
+
+## Runs
+
+44196788134  gpu72                    02b3cf82  in_progress   <- pipeline proof only, OLD code
+44198730650  upstream-latest-20261118 7777ae65  in_progress   <- the real deliverable
+
+Both dispatched with fast=false, create_data_seed=true.
+create_data_seed=true because the upstream seeds all declare volume 219442C4 and
+our device held 0EBB496E, so seed_artifact_id could not preserve identity anyway
+(see upstream-seed-identity-20261118.txt).
+
+## To be filled when 44198730650 finishes
+
+- conclusion, duration
+- artifact names + sizes
+- sha256 of boot.img, sha256 of the seed artifact
+- whether the payload carries the audio HAL (PR #23) and mic capture (#24)
