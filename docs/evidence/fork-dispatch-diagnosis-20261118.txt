@@ -1,0 +1,46 @@
+# Why our fork's Compose dispatch never ran (read-only, 2026-11-18 06:5x)
+
+## Access on the upstream repo
+GET /repos/YinCQL/UniXNU-picasso with our token:
+  permissions = {admin:false, maintain:false, push:false, triage:false, pull:true}
+=> we can READ upstream but cannot dispatch a workflow there. Step 2 of the
+   instruction ("build on the upstream repo") needs collaborator access we do not
+   have; that is a request to the author, not something we can work around.
+
+## State of our fork
+  /repos/tangpeiyao123/UniXNU-picasso                private=false, fork=true
+  /repos/.../actions/permissions                     enabled=true, allowed_actions=all
+  /repos/.../actions/secrets                         total_count=0
+  plan                                               free
+So Actions is on, the repo is public, and there are no secrets to miss. The
+failure is not "workflows disabled" and not "missing secret".
+
+## What actually happened, three times
+  run 44115203670  macos-15-intel  queued 23:30:58 -> cancelled 23:45:59  runner=""  steps=0
+  run 44119860887  macos-15-intel  queued 23:55:30 -> cancelled 00:10:31  runner=""  steps=0
+  run 44123808295  macos-15        queued 00:2x    -> cancelled 00:4x      runner=""  steps=0
+All three: the job object exists, no runner is ever assigned, and not a single
+step executes. Changing the label from macos-15-intel to macos-15 changed nothing,
+so the label is not the variable.
+
+## How upstream's runs differ
+Upstream's successful runs are push / pull_request events:
+  43701328576  Picasso host regressions  push            39d79083  success
+  43220830502  Build Picasso Kernel      workflow_dispatch d627aa63  success
+The one workflow_dispatch that succeeded upstream was on the author's own repo.
+We have no counter-example of a fork dispatch that worked, so the remaining
+untested variable is the trigger: push event vs workflow_dispatch on a fork.
+
+## Also found: our workflow is the old one
+Our .github/workflows/compose-bootimg.yml has inputs fast + create_data_seed only.
+The upstream tip adds seed_artifact_id ("Exact retained Data seed artifact ID"),
+which is the official way to reuse an existing seed instead of minting one. That
+input does not exist in our copy because we are 218 commits behind.
+
+## Conclusion (one actionable difference)
+Not "GitHub gives forks no macOS runner" -- that was my earlier claim and it is
+unsupported. What is supported: with Actions enabled, no secrets and a public
+fork, a workflow_dispatch job still gets no runner for fifteen minutes. The next
+thing to test is a push-triggered run (add `on: push` to a scratch branch), which
+is how every upstream success happened. If that also gets no runner, the issue is
+account-level macOS entitlement and the only path is upstream collaborator access.
