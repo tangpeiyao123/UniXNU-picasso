@@ -1,0 +1,25 @@
+# Upstream artifacts, read-only inventory (2026-11-18 06:4x, GitHub API)
+# repo: YinCQL/UniXNU-picasso   total artifacts: 24 (non-expired)
+# digest is the value GitHub returns for the artifact zip.
+
+SIZE      NAME                            BRANCH        COMMIT    DIGEST
+55.3 MB   picasso-bootimg-190             feat/fix-v1   d627aa63  sha256:73f1b351ff2e54b695fce5b60f77646baef0dbef066d29c31bd6f01b59d17d59  (2026-11-12 12:44)
+52.4 MB   picasso-linux-bootimg-23        feat/fix-v1   d627aa63  sha256:eaca72ceefa873a78de6bde28a5868d7520b59624bd47236e61634efd8918846  (2026-11-12 12:51)
+ 1.3 MB   picasso-data-seed-190           feat/fix-v1   d627aa63  sha256:1f191f094794e578edf65d867753dd771d586ae8537f1d04d59115e919d1614e  (2026-11-12 12:44)
+ 1.2 MB   picasso-generated-data-seed-1   main-ios16    35ba40fd  sha256:0490f733c2bea359580df98df1f8ee24d29d57a971516519dbe06a5f23b54ecb  (2026-11-10 22:03)
+ 0.1 MB   picasso-host-43701328576        main-ios16    39d79083  sha256:70d61ebac42044d1e1d88415ee8e16f706d06e554bbb8d293870413821c580a3  (2026-11-15 09:56)
+
+# READING
+# - boot images exist ONLY for d627aa63 (2026-11-12, pre-merge snapshot).
+# - the merged tip 39d7908 (PR #23 + #24) has NO boot image artifact, only host libs.
+# - therefore "use the merged upstream build" is not possible from artifacts alone;
+#   either build it (needs a macOS runner, three dispatches got none) or use the
+#   d627aa63 pair, which is two days older than the audio/graphics merge.
+# - the d627aa63 boot image and its data seed are a matched pair (same commit, same run day).
+
+# LOCAL VERIFICATION ALREADY DONE (2026-11-17)
+# boot-190.zip 55,323,008 B, unzips clean, boot/boot.img 86,077,440 B
+#   sha256 98ab0922f0e1d0047970dc9b4e93e894e007c533b41d58c226f9b39fe08d006d  == SHA256SUMS  OK
+#   boot.json kernel_sha256 452f80e2...  dtb_sha256 dd026351...  hardware_tested false
+# seed-190.zip 1,268,847 B, setup.dbr 1,343,728 B
+#   expanded to raw 21,474,836,480 B, sha256 b94c72e7...c4f8bdfa == inspect_packed raw_sha256  OK
