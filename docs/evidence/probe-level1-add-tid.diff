@@ -1,0 +1,63 @@
+diff --git a/patches/picasso-usb-console-xnu.patch b/patches/picasso-usb-console-xnu.patch
+index 13828c0..3bb3b63 100644
+--- a/patches/picasso-usb-console-xnu.patch
++++ b/patches/picasso-usb-console-xnu.patch
+@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
+ new file mode 100644
+ --- /dev/null
+ +++ b/bsd/dev/picasso_usb.c
+-@@ -0,0 +1,3322 @@
++@@ -0,0 +1,3339 @@
+ +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
+ + *
+ + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
+@@ -39,6 +39,8 @@ new file mode 100644
+ +#include <kern/thread.h>
+ +#include <sys/proc.h>
+ +#include <kern/task.h>
+++#include <mach/task.h>
+++#include <mach/thread_info.h>
+ +#include <kern/sched_prim.h>
+ +#include <machine/machine_routines.h>
+ +#include <machine/atomic.h>
+@@ -2333,18 +2335,33 @@ new file mode 100644
+ +{
+ +	proc_t p = proc_find(pid);
+ +	task_t task;
+++	thread_array_t threads = NULL;
+++	mach_msg_type_number_t count = 0, i;
+++	kern_return_t kr;
+++
+ +	if (p == NULL) {
+ +		printf("PICASSO_THREADS pid=%d absent\n", pid);
+ +		return;
+ +	}
+ +	task = proc_task(p);
+-+	/* Exported headers expose only forward declarations of struct task/thread,
+-+	 * so per-thread fields (state/priority/saved_state/continuation) are not
+-+	 * accessible in this translation unit. Emit a reachability marker instead:
+-+	 * this still proves threads/kthreads is reachable in a STALL window. */
+-+	printf("PICASSO_THREADS pid=%d reachable proc=%p task=%p minimal\n",
+-+		pid, (void *)p, (void *)task);
+-+	printf("PICASSO_THREADS end pid=%d\n", pid);
+++	kr = task_threads(task, &threads, &count);
+++	if (kr != KERN_SUCCESS) {
+++		printf("PICASSO_THREADS pid=%d task_threads kr=%d\n", pid, kr);
+++		proc_rele(p);
+++		return;
+++	}
+++	printf("PICASSO_THREADS begin pid=%d count=%d\n", pid, count);
+++	for (i = 0; i < count && i < 96; i++) {
+++		thread_identifier_info_data_t tinfo;
+++		mach_msg_type_number_t tinfo_count = THREAD_IDENTIFIER_INFO_COUNT;
+++		kern_return_t ikr = thread_info(threads[i], THREAD_IDENTIFIER_INFO,
+++		    (thread_info_t)&tinfo, &tinfo_count);
+++		printf("PICASSO_THREADS tid=%d idx=%d port=0x%x thread_id=%llu kr=%d\n",
+++		    i, i, threads[i],
+++		    (ikr == KERN_SUCCESS) ? (unsigned long long)tinfo.thread_id : 0ULL,
+++		    ikr);
+++	}
+++	printf("PICASSO_THREADS end pid=%d count=%d\n", pid, count);
+ +	proc_rele(p);
+ +}
+ +
