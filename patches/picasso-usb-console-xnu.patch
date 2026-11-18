@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3334 @@
+@@ -0,0 +1,3309 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -2326,38 +2326,13 @@ new file mode 100644
 +	}
 +}
 +
-+/* Read-only thread dump: one line per thread of a process. `continuation` is
-+ * the kernel function the thread will resume in, which is enough to tell a
-+ * thread blocked on a lock from one parked in mach_msg. */
++/* Thread dump stub: implementation moved to osfmk/kern/debug.c to avoid
++ * EXPORT_HEADERS limitations. This stub just calls the internal version. */
 +static void
 +picasso_thread_dump(int pid)
 +{
-+	proc_t p = proc_find(pid);
-+	task_t task;
-+	thread_array_t threads = NULL;
-+	mach_msg_type_number_t count = 0, i;
-+	kern_return_t kr;
-+
-+	if (p == NULL) {
-+		printf("PICASSO_THREADS pid=%d absent\n", pid);
-+		return;
-+	}
-+	task = proc_task(p);
-+	kr = task_threads(task, &threads, &count);
-+	if (kr != KERN_SUCCESS) {
-+		printf("PICASSO_THREADS pid=%d task_threads kr=%d\n", pid, kr);
-+		proc_rele(p);
-+		return;
-+	}
-+	printf("PICASSO_THREADS begin pid=%d count=%u\n", pid, count);
-+	for (i = 0; i < count && i < 96; i++) {
-+		/* idx is a thread ordinal (0..n-1), not a kernel tid;
-+		 * stable only within one capture session. True tid/state/
-+		 * continuation require a different dump path (later level). */
-+		printf("PICASSO_THREADS idx=%u\n", i);
-+	}
-+	printf("PICASSO_THREADS end pid=%d count=%u\n", pid, count);
-+	proc_rele(p);
++	extern void picasso_thread_dump_internal(int pid);
++	picasso_thread_dump_internal(pid);
 +}
 +
 +static void
@@ -3451,7 +3426,45 @@ index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e42
  #pragma clang diagnostic pop
  
  #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
-@@ -1239,6 +1243,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1239,6 +1239,50 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
++/* Picasso thread dump: walks task->threads directly to avoid MIG APIs
++ * that are unavailable under EXPORT_HEADERS. Prints state/continuation
++ * for each thread so we can tell blocked vs parked threads apart. */
++void
++picasso_thread_dump_internal(int pid)
++{
++	task_t task;
++	thread_t thread;
++	proc_t p = NULL;
++	unsigned int count = 0;
++
++	if (pid == 0) {
++		task = kernel_task;
++	} else {
++		p = proc_find(pid);
++		if (p == NULL) {
++			printf("PICASSO_THREADS pid=%d absent\n", pid);
++			return;
++		}
++		task = proc_task(p);
++	}
++
++	printf("PICASSO_THREADS begin pid=%d\n", pid);
++	queue_iterate(&task->threads, thread, thread_t, task_threads) {
++		printf("PICASSO_THREADS tid=%u state=%d cont=%p\n",
++		    (unsigned int)thread_tid(thread), (int)thread->state,
++		    (void *)thread->continuation);
++		count++;
++		if (count >= 96) {
++			break;
++		}
++	}
++	printf("PICASSO_THREADS end pid=%d count=%u\n", pid, count);
++	if (p != NULL) {
++		proc_rele(p);
++	}
++}
++
  void
  panic_spin_forever(void)
  {
