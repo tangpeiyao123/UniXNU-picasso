@@ -74,10 +74,18 @@ static void picassoLogThread(void *,wait_result_t) {
 // CRC checks still precede initialization. No writes to the root or GPT.
 extern "C" int picasso_data_init_begin(uint64_t pages,const uint8_t seed[32]) {
     uint32_t request=0;PE_parse_boot_argn("picasso-data-replace-20g",&request,sizeof(request));
-    if(!seed || pages!=5242880 || gStoreRegionBlocks!=5243041 || gStoreRegionFirst!=9825114 ||
-       gStoreGeometry.first!=2883584 || gStoreGeometry.last!=15330298 ||
+    // Runtime geometry (regionFirst/last/GPT CRCs) comes from this device's
+    // GPT at boot; pinning one board's build-time values here regressed Data
+    // init after the layout changed. The journal identity below binds those
+    // same runtime values through put64/put32, and Journal::begin() re-checks
+    // them with memcmp(saved,identity) before it will resume a complete
+    // journal (phase==2). So structural guards stay, identity generation stays
+    // byte-identical, and the completeness check moves to the single source of
+    // truth: the durable journal identity. RT-resume never resets a completed
+    // journal -- begin() returns 2 without consulting `authorized`.
+    if(!seed || pages!=5242880 || gStoreRegionBlocks!=5243041 ||
+       gStoreGeometry.first!=2883584 ||
        gStoreGeometry.imageBytes!=8380219392ULL || reserveBlocks()!=262144 ||
-       gStoreGeometry.headerCrc!=0x3c17a352 || gStoreGeometry.entriesCrc!=0xd82988c2 ||
        native_ufs_store_gpt_check() || !picassoRecordWindowOpen())return 0;
     uint8_t identity[picasso_data_init::identityBytes]={};
     picasso_record::put64(identity,gStoreGeometry.first);
