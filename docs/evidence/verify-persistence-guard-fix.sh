@@ -29,9 +29,10 @@ grep -qF 'imageBytes!=8380219392ULL' "$F" &&
 grep -qF 'reserveBlocks()!=262144' "$F" &&
 grep -qF 'native_ufs_store_gpt_check()' "$F" &&
 grep -qF 'picassoRecordWindowOpen()' "$F" &&
-# 4) resume 逻辑不动 + 只改一个文件
+# 4) resume 逻辑不动 + 修复本体等价判据（适配回退场景：不再断言"只改1个文件"）
 git diff --quiet -- "$D" &&
 grep -qF 'if(phase==2){complete=true;return 2;}' "$D" &&
-test "$(git diff --name-only | grep -c .)" = "1" &&
+# PicassoPersistence.h 相对 HEAD(f10634d) 无改动 → f10634d 的修复原样保留
+git diff --quiet -- "$F" &&
 git diff --check -- "$F"
 echo PERSIST_GUARD_RC=$?
