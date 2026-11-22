@@ -270,6 +270,8 @@ jobs:
             device/out/picasso/host-checks/ui-runtime/startup/*.log
             device/out/picasso/host-checks/ufs-cache/*.log
             device/out/picasso/host-checks/ufs-persistence/*.log
+            device/out/picasso/host-checks/persistent-data/*.log
+            device/out/picasso/host-checks/persistent-data/*.inc
             device/out/picasso/host-checks/novatek/*.log
             device/out/picasso/host-checks/linux-host/*.log
             device/out/picasso/host-checks/linux-host/*.json
