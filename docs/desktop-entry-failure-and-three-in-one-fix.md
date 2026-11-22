@@ -241,4 +241,7 @@ PR#25 后 `build-kernel-linux.yml` 必填 `compose_run_id`：kernel 消费**同 
 > - 三项功能固化后仍生效：GPU `direct scanout on bank=2` + `ACCEL published=0`；音频 `firmware error=0 / validated=1 / pas=1`、`observed ready=1 glink_error=0`；蓝牙 `power=1 result=0 baud=3000000`。用户实机确认声音/流畅度/蓝牙均正常。
 > - 回滚物料仍在 `D:/k30i-backup/`：`boot-author-final-uuid.img`（sha `ea4b934b…`，上版稳定）、`boot-x190-0EBB496E.img`、`boot-stock.img`；如需回滚只需 `fastboot flash boot <回滚镜像>`。
 >
-> **CPU 调度问题专项**：历史样本（`sample-healthy.log`/`sample-plus6.log`，11-13）里 `PICASSO_CPUFREQ gov` 的 `d2`（大核簇，CPU6/7）`busy=100` 持续 45/45 次采样全部满载；本次三项合一（临时+固化）d2 均值约 30~60%、最高 82~89%、0 次满载。注意 `busy=` 是 domain/簇级占空比而非单核精确利用率，结论限于"大核簇不再持续 100%"；负载下降最可能与 GPU 零拷贝直出参数（`scanout=2`/`glwait=0`）相关，属相关性推断。
+> **CPU 调度问题专项**：历史样本（`sample-healthy.log`/`sample-plus6.log`，11-13）里 `PICASSO_CPUFREQ gov` 的 `d2`（大核簇，CPU6/7）`busy=100` 持续 45/45 次采样全部满载（d0 avg 43.7% / d1 avg 25.4% / d2 avg 100%）。本次三项合一固化后日志全量 27 个 gov 样本（含启动+静置 2.5 分钟持续采样）：d0 n=27 min=0 max=94 avg=39.8、d1 n=27 min=5 max=81 avg=25.4、d2 n=27 min=5 max=82 avg=29.4，**三个 domain 全部 0 次 ≥99% 满载**。
+> - 限定一：`busy=` 是 domain/簇级占空比统计，不是单个 core 的精确利用率；日志里 `ArmCpu: CPU x after 5s ... timer=` 是启动 5 秒时的定时器快照，非持续占用率。故结论严格限于"大核簇不再持续 100%"，不可夸大为"已证明每个核心都不会 100%"。
+> - 限定二：负载下降最可能与 GPU 零拷贝直出参数（`scanout=2`/`glwait=0`）相关，属相关性推断而非严格因果证明。
+> - 推荐对用户表述："历史观察到的单核/大核簇 100% 满载问题，在当前镜像约 3 分钟的采样窗口内未复现，大核簇平均负载从 100% 降到约 29%。"
