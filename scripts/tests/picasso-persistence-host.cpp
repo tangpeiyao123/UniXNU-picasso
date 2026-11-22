@@ -130,12 +130,16 @@ static unsigned run(){
     unsigned cases=0;uint8_t seed[32]={0x19};medium.limit=15330299;
     authorized=false;assert(!picasso_data_init_begin(5242880,seed) && !medium.writes);++cases;
     authorized=true;gptBad=true;assert(!picasso_data_init_begin(5242880,seed) && !medium.writes);++cases;gptBad=false;
-    ++gStoreRegionFirst;assert(!picasso_data_init_begin(5242880,seed) && !medium.writes);++cases;--gStoreRegionFirst;
+    // Runtime regionFirst is device geometry, not a build-time pin. A blank
+    // store may initialize with the measured value; the journal identity still
+    // binds it, which is checked against a completed journal below.
     assert(!picasso_data_init_begin(1048576,seed) && !medium.writes);++cases;
     assert(picasso_data_init_begin(5242880,seed)==1);++cases;
     Medium pending=medium;
     assert(picasso_data_init_begin(5242880,seed)==1 && picasso_data_init_finish());++cases;
     Medium completed=medium;auto writes=medium.writes;
+    // A completed journal must not resume against another measured region.
+    ++gStoreRegionFirst;assert(!picasso_data_init_begin(5242880,seed) && medium.writes==writes);--gStoreRegionFirst;++cases;
     // A remaining replacement bootarg cannot reset an already published disk.
     assert(picasso_data_init_begin(5242880,seed)==2 && picasso_data_init_finish());writes=medium.writes;++cases;
     seed[0]^=1;assert(!picasso_data_init_begin(5242880,seed) && medium.writes==writes);seed[0]^=1;++cases;
