@@ -36,6 +36,7 @@ volatile uint32_t native_wlan_sid = WLAN_SMMU_SID;
 volatile uint64_t native_wlan_msa_base = WLAN_MSA_BASE, native_wlan_msa_size = WLAN_MSA_SIZE;
 volatile uint32_t native_wlan_msa_pages, native_wlan_msa_word;
 volatile uint32_t native_wlan_fw_present, native_wlan_fw_segments, native_wlan_fw_hash, native_wlan_fw_payload;
+volatile uint32_t native_wlan_fw_auth, native_wlan_fw_needs_tz;
 volatile uint32_t native_wlan_handshake_step;
 volatile int native_wlan_handshake_error;
 
@@ -219,6 +220,8 @@ int stage3(void *ctx) {
     }
     if (!firmware || !size) {
         native_wlan_fw_present = 0;
+        native_wlan_fw_auth = 0;
+        native_wlan_fw_needs_tz = 0;
         native_wlan_handshake_step = WLAN_HS_LOAD;
         native_wlan_handshake_error = WLAN_ERR_NOENT;
         printf("PICASSO_WLAN stage3 no firmware staged: link native_wlan_firmware[]/native_wlan_firmware_size or "
@@ -231,10 +234,16 @@ int stage3(void *ctx) {
     int rc = wlan_mbn_parse(&mbn, firmware, size);
     if (rc) return fail(32, rc);
     rc = wlan_mbn_verify_hashes(&mbn, firmware, size);
-    if (rc) return fail(32, rc);
+    // WLAN_ERR_NEEDS_TZ_AUTH is the expected, safe result for a signed image: structure parsed, authenticity
+    // delegated to TrustZone PAS. This stage only plans the load (there is no SCM/TZ path in this tree), so record
+    // the state and continue reporting; never treat it as "verified" and never as a fatal malformed image.
+    if (rc && rc != WLAN_ERR_NEEDS_TZ_AUTH) return fail(32, rc);
+    const int auth = static_cast<int>(wlan_mbn_auth(&mbn));
     native_wlan_fw_segments = mbn.segments;
     native_wlan_fw_hash = mbn.hash_index == WLAN_MBN_NO_HASH ? 0 : mbn.hash_count;
     native_wlan_fw_payload = static_cast<uint32_t>(mbn.payload_size);
+    native_wlan_fw_auth = static_cast<uint32_t>(auth);
+    native_wlan_fw_needs_tz = auth == WLAN_AUTH_TZ_PAS ? 1u : 0u;
 
     native_wlan_step = 33;
     struct HandshakeContext hctx = {0};
@@ -243,8 +252,10 @@ int stage3(void *ctx) {
     rc = wlan_handshake_run(&ops, &mbn, WLAN_MSA_BASE, WLAN_MSA_SIZE, 50, &state);
     native_wlan_handshake_step = state.step;
     native_wlan_handshake_error = state.error;
-    printf("PICASSO_WLAN stage3 fw=%u bytes segs=%u hash=%u payload=%u load=not-run handshake_step=%u error=%d\n",
+    printf("PICASSO_WLAN stage3 fw=%u bytes segs=%u hash=%u payload=%u auth=%u needs_tz=%u load=not-run "
+           "handshake_step=%u error=%d\n",
            static_cast<unsigned>(size), native_wlan_fw_segments, native_wlan_fw_hash, native_wlan_fw_payload,
+           native_wlan_fw_auth, native_wlan_fw_needs_tz,
            native_wlan_handshake_step, native_wlan_handshake_error);
     // A malformed image is fatal; an unavailable secure load is an environment fact reported by stage 5.
     return 0;

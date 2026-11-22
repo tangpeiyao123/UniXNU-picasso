@@ -5,17 +5,25 @@
 #include <string.h>
 
 // ---------------------------------------------------------------------------------------------------------------
-// Inventory. Sizes and SHA-256 values were measured read-only from /tmp/picasso-vendor/vendor.img (V12 ext4) and
-// /tmp/picasso-vendor/super.raw (V13 vendor ext4, partition base 0x17b300000). No vendor file is stored here.
+// Inventory. Sizes and SHA-256 values were measured read-only from /tmp/picasso-vendor/vendor.img (V12 ext4),
+// /tmp/picasso-vendor/super.raw (V13 vendor ext4, partition base 0x17b300000), and the device's modem.img
+// (firmware/modem-image, extracted read-only). No vendor/firmware file is stored here: a present entry pins the
+// identity the loader must resolve from the device partition and check before use.
 // Two extraction facts that are easy to get wrong: /firmware/wlan/qca_cld/{WCNSS_qcom_cfg.ini,wlan_mac.bin} are
 // symlinks in both images (the real config is /vendor/etc/wifi, the MAC/NV target is in /data or persist), and
 // qca_cld3_wlan.ko contains ext4 holes: its size/hash below are the logical file with holes read as zeros.
 // ---------------------------------------------------------------------------------------------------------------
 const struct wlan_fw_inventory wlan_firmware_inventory[] = {
-    {"modem.mdt", "expected", "PIL container for the modem subsystem; pil_modem loads qcom,firmware-name=\"modem\" "
-     "into modem_wlan_mem, next to the MSA region", "picasso.dts:6451-6477 (pil_modem), 485-489", WLAN_FW_MBN, 0, 0, NULL},
-    {"wlanmdsp.mbn", "expected", "conventional WLAN/WCSS DSP image; this DT has no wlan PIL node and the stock Image "
-     "does not contain the name", "lito convention; absent from picasso.dts and stock-kernel strings", WLAN_FW_MBN, 0, 0, NULL},
+    {"modem.mdt", "device modem.img, read-only, NOT in tree", "PIL container for the modem subsystem; pil_modem "
+     "loads qcom,firmware-name=\"modem\" into modem_wlan_mem, next to the MSA region. 35 program headers "
+     "(>= WLAN_MBN_MAX_SEGMENTS); pin recorded so the loader can resolve+check it on the device",
+     "device D:/k30i-firmware/modem-image/modem.mdt; picasso stock DTB pil_modem x5", WLAN_FW_MBN, 1, 9420,
+     "c971b0e3e66fa5b1a3c96758745185fcb4658870c54d2c5b2cddee8bf6f80c1a"},
+    {"wlanmdsp.mbn", "device modem.img, read-only, NOT in tree", "signed WLAN/WCSS DSP image (machine=164 "
+     "Hexagon, PH[1] flags=0x2200000 -> TrustZone auth); present on THIS device but the stock DTB has no wlan "
+     "PIL node, so the native path is pil_modem, not this file. Pin recorded for provenance only",
+     "device D:/k30i-firmware/modem-image/wlanmdsp.mbn; 7 program headers", WLAN_FW_MBN, 1, 3871128,
+     "ec5c687c3e58dd5c06804a828abccc2c103fcb72112498876a2075ce30c5c1e0"},
     {"athwlan.bin", "referenced by qca_cld3_wlan.ko", "WLAN MAC firmware downloaded by qcacld over BMI/SNOC",
      "V12/V13 qca_cld3_wlan.ko: athwlan.bin, bmi_download_firmware, \"Loading firmware file %s\"", WLAN_FW_OPAQUE, 0, 0, NULL},
     {"athsetup.bin", "referenced by qca_cld3_wlan.ko", "BMI setup payload", "V12/V13 qca_cld3_wlan.ko strings",
@@ -30,7 +38,11 @@ const struct wlan_fw_inventory wlan_firmware_inventory[] = {
      WLAN_FW_OPAQUE, 0, 0, NULL},
     {"bdwlan.%03x.b%02x", "expected", "board data selected by chip id and board id",
      "V13 /bin/cnss-daemon: bdwlan.%03x, bdwlan.b%02x, bdwlan.bin", WLAN_FW_BDF, 0, 0, NULL},
-    {"bdwlan.bin", "expected", "default board data", "V13 /bin/cnss-daemon strings", WLAN_FW_BDF, 0, 0, NULL},
+    {"bdwlan.bin", "device modem.img, read-only, NOT in tree", "default board data (26,328 B, raw outer "
+     "container; internal BDF layout is NDA). 37 board/chip variants observed; wlan_bdf_name() selects by "
+     "chip_id/board_id, whose source on this board is still to be established",
+     "device D:/k30i-firmware/modem-image/bdwlan.bin + bdwlan.bXX/.XXX x37", WLAN_FW_BDF, 1, 26328,
+     "d19d230c976e19965c87131de3a9426cd833c7b339a89925a2ee1926330d9fb2"},
     {"regdb.bin", "expected", "regulatory database handed to the WLAN firmware",
      "V13 /bin/cnss-daemon string", WLAN_FW_OPAQUE, 0, 0, NULL},
     {"WCNSS_qcom_cfg.ini", "V12 vendor.img /etc/wifi", "the real V12 driver configuration (the "
@@ -125,12 +137,19 @@ static int mbn_read_header(struct wlan_mbn *out, const uint8_t *data, size_t siz
     out->machine = machine;
     out->phnum = phnum;
     out->segments = phnum;
+    unsigned signed_segments = 0;
     for (unsigned i = 0; i < phnum; ++i) {
         const uint8_t *p = data + phoff + 32u * i;
         struct wlan_mbn_segment *s = &out->seg[i];
         s->type = rd32(p + 0); s->offset = rd32(p + 4); s->vaddr = rd32(p + 8); s->paddr = rd32(p + 12);
         s->filesz = rd32(p + 16); s->memsz = rd32(p + 20); s->flags = rd32(p + 24); s->align = rd32(p + 28);
         if ((uint64_t)s->offset + s->filesz > 0xffffffffULL) return WLAN_ERR_INVAL;
+        // Qualcomm PIL images mark their hash/certificate segment with flags & 0x07000000 == 0x02000000 (observed
+        // on this board: both adsp.mdt PH[1] and wlanmdsp.mbn PH[1] have 0x2200000). What follows that header is
+        // either a plain (len,SHA-1) table (adsp) or a signed certificate (wlanmdsp); the host cannot tell which,
+        // and an unkeyed SHA-1 can only prove integrity, never authenticity. Presence of this flag therefore means
+        // authenticity must be delegated to TrustZone PAS regardless of any host-computable hash table.
+        if ((s->flags & 0x07000000u) == 0x02000000u) ++signed_segments;
     }
     // Hash segment convention: program header 0 is PT_LOAD with no file bytes and a non-zero memory size.
     // The hash table is stored immediately after the program header array.
@@ -150,10 +169,19 @@ static int mbn_read_header(struct wlan_mbn *out, const uint8_t *data, size_t siz
     }
     for (unsigned i = 0; i < phnum; ++i) {
         const struct wlan_mbn_segment *s = &out->seg[i];
-        if (i != out->hash_index) out->payload_size += s->filesz;
+        // Only PT_LOAD segments are copied into PIL memory. PT_NOTE/PT_DYNAMIC are legitimately nested inside a
+        // PT_LOAD range, and the PT_NULL header/certificate segments are not firmware payload. Counting all types
+        // here both inflates payload_size and (in wlan_mbn_parse) makes legal nesting look like an overlap.
+        if (s->type == 1u && i != out->hash_index) out->payload_size += s->filesz;
         const uint64_t end = (uint64_t)s->offset + s->filesz;
         if (end > out->image_extent) out->image_extent = end;
     }
+    // TrustZone wins: if a Qualcomm hash/certificate segment is present, authenticity is NOT established by the
+    // host even when a plain hash table also happens to be present (an unkeyed SHA-1 can be recomputed by anyone
+    // who can modify the image). Only genuinely hash-only images with no signed segment are host-verifiable.
+    if (signed_segments) out->auth = WLAN_AUTH_TZ_PAS;
+    else if (out->hash_index != WLAN_MBN_NO_HASH) out->auth = WLAN_AUTH_HOST_HASH;
+    else out->auth = WLAN_AUTH_NONE;
     return 0;
 }
 
@@ -173,11 +201,14 @@ int wlan_mbn_parse(struct wlan_mbn *out, const uint8_t *data, size_t size) {
         const struct wlan_mbn_segment *s = &out->seg[i];
         if ((uint64_t)s->offset + s->filesz > size) return WLAN_ERR_INVAL;
     }
-    // Payload ranges must not overlap. The hash segment has no file bytes, so it cannot collide.
+    // Only PT_LOAD payload ranges must not overlap each other. Non-LOAD segments (PT_NULL header/certificate,
+    // PT_NOTE, PT_DYNAMIC) are legitimately nested inside a PT_LOAD file range in a signed ELF; treating every
+    // segment type as a collidable payload rejected real images such as wlanmdsp.mbn (PH[2]/PH[6] and
+    // PH[3]/PH[4] nest by design). The hash segment has no file bytes, so it cannot collide.
     for (unsigned i = 0; i < out->segments; ++i) {
-        if (i == out->hash_index || !out->seg[i].filesz) continue;
+        if (out->seg[i].type != 1u || i == out->hash_index || !out->seg[i].filesz) continue;
         for (unsigned j = i + 1; j < out->segments; ++j) {
-            if (j == out->hash_index || !out->seg[j].filesz) continue;
+            if (out->seg[j].type != 1u || j == out->hash_index || !out->seg[j].filesz) continue;
             const uint64_t ai = out->seg[i].offset, ae = ai + out->seg[i].filesz;
             const uint64_t bi = out->seg[j].offset, be = bi + out->seg[j].filesz;
             if (ai < be && bi < ae) return WLAN_ERR_INVAL;
@@ -192,9 +223,21 @@ int wlan_mbn_parse(struct wlan_mbn *out, const uint8_t *data, size_t size) {
     return 0;
 }
 
+enum wlan_mbn_auth wlan_mbn_auth(const struct wlan_mbn *mbn) {
+    return mbn ? mbn->auth : WLAN_AUTH_NONE;
+}
+
 int wlan_mbn_verify_hashes(const struct wlan_mbn *mbn, const uint8_t *data, size_t size) {
     if (!mbn || !data) return WLAN_ERR_INVAL;
-    if (mbn->hash_index == WLAN_MBN_NO_HASH) return 0;   // unsigned image: nothing to verify
+    // A signed image is never "verified" on the host, even if it also carries a plain hash table: an unkeyed
+    // SHA-1 can be recomputed by anyone who can modify the bytes. Delegate authenticity to TrustZone PAS.
+    if (mbn->auth == WLAN_AUTH_TZ_PAS) return WLAN_ERR_NEEDS_TZ_AUTH;
+    if (mbn->hash_index == WLAN_MBN_NO_HASH) {
+        // Fail closed. A signed image (auth delegated to TrustZone PAS) must NOT be reported as "verified":
+        // callers see a non-zero code and are forced through the pas_auth path. An unsigned image with no hash
+        // table is still accepted, but its auth source is WLAN_AUTH_NONE and it must never be trusted as signed.
+        return mbn->auth == WLAN_AUTH_TZ_PAS ? WLAN_ERR_NEEDS_TZ_AUTH : 0;
+    }
     if (mbn->hash_index != 0) return WLAN_ERR_INVAL;
     if ((uint64_t)mbn->hash_offset + mbn->hash_bytes > size) return WLAN_ERR_INVAL;
     if (mbn->hash_count < mbn->segments - 1) return WLAN_ERR_INVAL;
@@ -231,7 +274,9 @@ int wlan_mbn_parse_split(struct wlan_mbn *out, const uint8_t *mdt, size_t mdt_si
 int wlan_mbn_verify_hashes_split(const struct wlan_mbn *mbn, const uint8_t *const *parts,
                                  const size_t *part_sizes, unsigned nparts) {
     if (!mbn || !parts || !part_sizes) return WLAN_ERR_INVAL;
-    if (mbn->hash_index == WLAN_MBN_NO_HASH) return 0;
+    if (mbn->auth == WLAN_AUTH_TZ_PAS) return WLAN_ERR_NEEDS_TZ_AUTH;
+    if (mbn->hash_index == WLAN_MBN_NO_HASH)
+        return mbn->auth == WLAN_AUTH_TZ_PAS ? WLAN_ERR_NEEDS_TZ_AUTH : 0;
     if (mbn->hash_index != 0 || nparts < mbn->segments) return WLAN_ERR_INVAL;
     if (mbn->hash_count < mbn->segments - 1) return WLAN_ERR_INVAL;
     for (unsigned k = 0; k + 1 < mbn->segments; ++k) {

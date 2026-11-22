@@ -21,12 +21,16 @@ extern "C" {
 #define WLAN_ERR_INVAL (-22)
 #define WLAN_ERR_NOTSUP (-45)
 #define WLAN_ERR_TIMEOUT (-110)
+// A structurally valid signed image whose authenticity is NOT established on the host. Callers must run the
+// TrustZone PAS auth path and only then treat it as trusted. Never treat this as "verification succeeded".
+#define WLAN_ERR_NEEDS_TZ_AUTH (-122)
 
 // ---------------------------------------------------------------------------------------------------------------
-// Inventory. "present" means the bytes (or the exact size/SHA-256 pair) were observed in the extracted V12
-// vendor.img or V13 super.raw. Names that the stock kernel or the vendor module reference but that are not in
-// those images are listed with present = 0: the real binaries live on the modem/firmware partition, which was not
-// part of the backup. Do not copy any of these files into the repository.
+// Inventory. "present" means the exact size/SHA-256 pair was observed read-only and is recorded below; it says
+// nothing about where the bytes live at runtime. The variant string names the source image. No firmware binary is
+// stored in this repository: a present entry is a pinned identity the loader resolves from the device partition
+// and checks before use. Entries with present = 0 were observed only as a name/reference (kernel/module string),
+// not as pinned bytes. Do not copy any of these files into the repository.
 enum wlan_fw_kind {
     WLAN_FW_OPAQUE = 0,   // raw firmware/BMI payload; no public container description
     WLAN_FW_MBN = 1,      // ELF32 PIL container (.mdt/.mbn/.b00...)
@@ -56,7 +60,9 @@ extern const unsigned wlan_firmware_count;
 // p_filesz == 0 and p_memsz == the hash-table size. The hash table starts immediately after the program header
 // array; each entry is a little-endian u32 length followed by a 20-byte SHA-1 digest of that segment. A table may
 // also carry one trailing self-hash entry for the table itself; verification covers the per-segment entries.
-#define WLAN_MBN_MAX_SEGMENTS 24
+// A signed Qualcomm PIL container (e.g. modem.mdt on this board) carries more than 24 program headers:
+// the observed image has 35. 40 leaves headroom without allowing an unbounded table.
+#define WLAN_MBN_MAX_SEGMENTS 40
 #define WLAN_MBN_MAX_SIZE (64u << 20)
 #define WLAN_MBN_HASH_LEN 20
 #define WLAN_MBN_HASH_ENTRY (4u + WLAN_MBN_HASH_LEN)
@@ -65,6 +71,11 @@ extern const unsigned wlan_firmware_count;
 struct wlan_mbn_segment {
     uint32_t type, offset, vaddr, paddr, filesz, memsz, flags, align;
 };
+
+// Where authenticity is established. Declared at file scope to avoid C/C++ linkage and naming ambiguity: this
+// header is shared by C parsers and the C++ kext (WlanProbe.cpp). Keep the safe value (NONE) at zero so a
+// zero-initialized struct is never treated as host-verified.
+enum wlan_mbn_auth { WLAN_AUTH_NONE = 0, WLAN_AUTH_HOST_HASH = 1, WLAN_AUTH_TZ_PAS = 2 };
 
 struct wlan_mbn {
     const uint8_t *data;      // header buffer (the .mdt or the single file); never owns it
@@ -77,8 +88,11 @@ struct wlan_mbn {
     uint32_t hash_offset;     // absolute offset of the hash table inside data
     uint32_t hash_bytes;      // hash segment p_memsz
     unsigned hash_count;      // number of entries in the hash table
-    uint64_t payload_size;    // sum of p_filesz over all non-hash segments
+    uint64_t payload_size;    // sum of p_filesz over PT_LOAD segments only (the bytes a PIL loader copies)
     uint64_t image_extent;    // max(p_offset + p_filesz) over all segments
+    // Safety-relevant: a signed image must never be mistaken for one the host verified. The host only checks
+    // structure and computes a copy plan; TrustZone PAS `pas_auth` alone authenticates a signed image.
+    enum wlan_mbn_auth auth;
 };
 
 // Parse and structurally validate the ELF header, program headers and hash-table shape. Does not require the
@@ -89,8 +103,15 @@ int wlan_mbn_parse_header(struct wlan_mbn *out, const uint8_t *data, size_t size
 // other. Segment 0 may cover the header itself (that is how ipa_fws.elf stores its header block).
 int wlan_mbn_parse(struct wlan_mbn *out, const uint8_t *data, size_t size);
 
+// Returns the parsed image's auth source (WLAN_AUTH_HOST_HASH when a host-verifiable hash table was found,
+// WLAN_AUTH_TZ_PAS when the image is signed and must be authenticated by TrustZone, WLAN_AUTH_NONE otherwise).
+// Callers that copy a signed image into PIL memory MUST require WLAN_AUTH_TZ_PAS and run pas_auth before use.
+enum wlan_mbn_auth wlan_mbn_auth(const struct wlan_mbn *mbn);
+
 // SHA-1 of every non-hash segment, compared with the hash table. Returns 0 when all digests match, -22 on a
-// malformed table, -5 on a digest mismatch. A valid image with no hash segment returns 0 (nothing to verify).
+// malformed table, -5 on a digest mismatch. A signed image whose authenticity lives in TrustZone returns
+// WLAN_ERR_NEEDS_TZ_AUTH: structurally parsed here, but NOT verified here — never 0. This closes the fail-open
+// where a signed image with no host hash table was reported as "nothing to verify".
 int wlan_mbn_verify_hashes(const struct wlan_mbn *mbn, const uint8_t *data, size_t size);
 
 // Split form: header in mdt, one part per program header (part[0] is the header/hash segment when it has filesz).

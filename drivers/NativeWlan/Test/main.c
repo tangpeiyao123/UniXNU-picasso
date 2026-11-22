@@ -383,6 +383,7 @@ int main(int argc, char **argv) {
     struct wlan_mbn m;
     CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0);
     CHECK(m.segments == 3 && m.machine == 40 && m.hash_index == 0 && m.hash_count == 2);
+    CHECK(wlan_mbn_auth(&m) == WLAN_AUTH_HOST_HASH);
     CHECK(m.payload_size == T_PAY1_LEN + T_PAY2_LEN);
     CHECK(m.image_extent == T_PAY2_OFF + T_PAY2_LEN);
     CHECK(wlan_mbn_verify_hashes(&m, mbn, T_FILE_LEN) == 0);
@@ -439,8 +440,35 @@ int main(int argc, char **argv) {
     // Unsigned image: removing the hash segment's memsz drops hash checking, and hashes are then a no-op.
     put32(mbn, T_PHOFF + 0 * 32 + 20, 0);
     CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0 && m.hash_index == WLAN_MBN_NO_HASH);
+    CHECK(wlan_mbn_auth(&m) == WLAN_AUTH_NONE);
     CHECK(wlan_mbn_verify_hashes(&m, mbn, T_FILE_LEN) == 0);
     put32(mbn, T_PHOFF + 0 * 32 + 20, T_HASH_BYTES);
+    CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0);
+
+    // A signed image (no host hash table, but a segment carrying the Qualcomm signed flag) must parse, be marked
+    // WLAN_AUTH_TZ_PAS, and return WLAN_ERR_NEEDS_TZ_AUTH from verify — never a silent 0 (fail-open). Also verify
+    // that a non-LOAD segment nested inside a PT_LOAD file range is legal and does not trigger a false overlap.
+    put32(mbn, T_PHOFF + 0 * 32 + 20, 0);                 // drop the host hash segment -> signed image path
+    put32(mbn, T_PHOFF + 1 * 32 + 24, 0x02000000u);       // PH[1] carries the Qualcomm signed flag
+    CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0);
+    CHECK(m.hash_index == WLAN_MBN_NO_HASH && wlan_mbn_auth(&m) == WLAN_AUTH_TZ_PAS);
+    CHECK(wlan_mbn_verify_hashes(&m, mbn, T_FILE_LEN) == WLAN_ERR_NEEDS_TZ_AUTH);
+    CHECK(wlan_mbn_verify_hashes_split(&m, parts, part_sizes, 3) == WLAN_ERR_NEEDS_TZ_AUTH);
+    // Nest a PT_NOTE (type 4) wholly inside the PH[1] PT_LOAD file range: must still parse (real signed MBNs do).
+    put_phdr(mbn, T_PHOFF + 2 * 32, 4, T_PAY1_OFF + 8, 0x3000, 8, 8);
+    CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0);
+    put_phdr(mbn, T_PHOFF + 2 * 32, 1, T_PAY2_OFF, 0x2000, T_PAY2_LEN, T_PAY2_LEN);  // restore PH[2]
+    put32(mbn, T_PHOFF + 1 * 32 + 24, 5);                // restore PH[1] flags
+    put32(mbn, T_PHOFF + 0 * 32 + 20, T_HASH_BYTES);     // restore hash segment
+    CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0 && m.hash_index == 0);
+
+    // The dangerous fail-open shape: a signed image that ALSO has a host-computable hash table. An unkeyed SHA-1
+    // can be recomputed by anyone who can edit the image, so the signed flag must win and verify must NOT return 0.
+    put32(mbn, T_PHOFF + 1 * 32 + 24, 0x02000005u);      // PH[1]: PT_LOAD data plus the Qualcomm hash/seg flag
+    CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0);
+    CHECK(m.hash_index == 0 && wlan_mbn_auth(&m) == WLAN_AUTH_TZ_PAS);   // signed wins over host hash
+    CHECK(wlan_mbn_verify_hashes(&m, mbn, T_FILE_LEN) == WLAN_ERR_NEEDS_TZ_AUTH);
+    put32(mbn, T_PHOFF + 1 * 32 + 24, 5);                // restore PH[1] flags
     CHECK(wlan_mbn_parse(&m, mbn, T_FILE_LEN) == 0);
 
     // Board-data container and file names.

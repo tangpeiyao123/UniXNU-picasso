@@ -154,6 +154,26 @@ jobs:
           python3 scripts/check-picasso-wlan.py --output out/picasso/host-checks/wlan
           cp out/picasso/host-checks/wlan/results.json out/picasso/logs/wlan-host.json
 
+      - name: Check real WiFi firmware structural regression
+        run: |
+          # Private firmware blobs are never staged in CI. This step always
+          # compiles and links the real-firmware probe (guards the parser API),
+          # and honestly records whether the structural assertions ran.
+          python3 scripts/check-picasso-wlan-real-fw.py --output out/picasso/host-checks/wlan-real-fw
+          cp out/picasso/host-checks/wlan-real-fw/results.json out/picasso/logs/wlan-real-fw-host.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r = json.loads(Path('out/picasso/host-checks/wlan-real-fw/results.json').read_text())
+          assert r.get('inputs'), 'real-fw probe did not record parsed inputs'
+          assert 'skipped' in r and 'passed' in r, 'real-fw probe did not record skip/pass state'
+          # skipped=true is expected on CI (no private blobs); the compile+link
+          # above is the guaranteed check. A full skipped=false run is done
+          # locally where the read-only device firmware is staged.
+          print('real-fw compile+link guarded; firmware_present=%s skipped=%s' %
+                (r['firmware_present'], r['skipped']))
+          PY
+
       - name: Check Picasso ADSP survey and firmware inputs
         run: |
           python3 scripts/check-picasso-adsp.py --output out/picasso/host-checks/adsp
