@@ -1,0 +1,50 @@
+name: Apple80211 layout ABI check
+
+# Verifies the apple80211 struct _Static_asserts with a real C compiler.
+# Self-contained sub-project; copy wifi-fakehw/ into a repo to activate.
+# Does NOT touch the device and does NOT claim iOS 16.7 layout == 16.5.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'wifi-fakehw/**'
+      - '.github/workflows/verify-layout.yml'
+  pull_request:
+    paths:
+      - 'wifi-fakehw/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apple80211-layout-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c-abi-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: wifi-fakehw
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # zig cc ships its own libc headers + sysroot for every target, so
+      # aarch64-macos cross-compile works WITHOUT a macOS SDK. apt clang does not.
+      - name: Install zig (portable C compiler)
+        run: python3 -m pip install ziglang
+
+      - name: Python mirror check (host, no compiler)
+        run: python3 apple80211_abi.py
+
+      - name: C11 _Static_assert check (native + arm64 ABIs)
+        run: bash run_ci_check.sh

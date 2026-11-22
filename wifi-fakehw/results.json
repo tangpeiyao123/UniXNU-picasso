@@ -1,0 +1,229 @@
+{
+  "layout": {
+    "baseline": "iOS 16.5 (HakiOS)",
+    "structs": {
+      "apple80211_assoc": {
+        "actual_size": 592,
+        "expected_size": 592,
+        "offsets": {
+          "key": 72
+        },
+        "checks": {
+          "size": true,
+          "offset.key": true
+        },
+        "pass": true
+      },
+      "apple80211_link_changed": {
+        "actual_size": 32,
+        "expected_size": 32,
+        "offsets": {
+          "reason": 20
+        },
+        "checks": {
+          "size": true,
+          "offset.reason": true
+        },
+        "pass": true
+      },
+      "apple80211_channels": {
+        "actual_size": 4824,
+        "expected_size": 4824,
+        "offsets": {},
+        "checks": {
+          "size": true
+        },
+        "pass": true
+      },
+      "apple80211_channels_info": {
+        "actual_size": 10016,
+        "expected_size": 10016,
+        "offsets": {
+          "number": 814,
+          "flags": 4816
+        },
+        "checks": {
+          "size": true,
+          "offset.number": true,
+          "offset.flags": true
+        },
+        "pass": true
+      },
+      "apple80211_scan_request": {
+        "actual_size": 5456,
+        "expected_size": 5456,
+        "offsets": {
+          "channels": 72,
+          "flags": 4872,
+          "names": 4888
+        },
+        "checks": {
+          "size": true,
+          "offset.channels": true,
+          "offset.flags": true,
+          "offset.names": true
+        },
+        "pass": true
+      },
+      "apple80211_scan_result": {
+        "actual_size": 1164,
+        "expected_size": 1164,
+        "offsets": {
+          "ssid_length": 96,
+          "age_ms": 132,
+          "elements": 140
+        },
+        "checks": {
+          "size": true,
+          "offset.ssid_length": true,
+          "offset.age_ms": true,
+          "offset.elements": true
+        },
+        "pass": true
+      }
+    },
+    "all_pass": true
+  },
+  "ioctl_sequence": [
+    {
+      "type": 43,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 44,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 12,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 19,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 15,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 27,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 254,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 207,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 13,
+      "set": false,
+      "error": 0
+    },
+    {
+      "type": 1,
+      "set": false,
+      "error": 6
+    },
+    {
+      "type": 9,
+      "set": false,
+      "error": 6
+    },
+    {
+      "type": 16,
+      "set": false,
+      "error": 6
+    },
+    {
+      "type": 10,
+      "set": true,
+      "error": 0
+    },
+    {
+      "type": 11,
+      "set": false,
+      "error": 5
+    },
+    {
+      "type": 20,
+      "set": true,
+      "error": 0
+    },
+    {
+      "type": 21,
+      "set": false,
+      "error": 0
+    }
+  ],
+  "events": [
+    {
+      "vendor_code": 1,
+      "kev_class": 6,
+      "kev_subclass": 1,
+      "event_code": 10,
+      "event_name": "SCAN_DONE",
+      "dv0": "en0",
+      "dv1_len": 0
+    },
+    {
+      "vendor_code": 1,
+      "kev_class": 6,
+      "kev_subclass": 1,
+      "event_code": 9,
+      "event_name": "ASSOC_DONE",
+      "dv0": "en0",
+      "dv1_len": 0
+    }
+  ],
+  "summary": [
+    "in this run: get 1 (SSID) 1 times, answered 0 times; last refusal 6",
+    "in this run: get 9 (BSSID) 1 times, answered 0 times; last refusal 6",
+    "in this run: set 10 (SCAN_REQ) 1 times, answered 1 times",
+    "in this run: get 11 (SCAN_RESULT) 1 times, answered 0 times; last refusal 5",
+    "in this run: get 12 (CARD_CAPABILITIES) 1 times, answered 1 times",
+    "in this run: get 13 (STATE) 1 times, answered 1 times",
+    "in this run: get 15 (OP_MODE) 1 times, answered 1 times",
+    "in this run: get 16 (RSSI) 1 times, answered 0 times; last refusal 6",
+    "in this run: get 19 (POWER) 1 times, answered 1 times",
+    "in this run: set 20 (ASSOCIATE) 1 times, answered 1 times",
+    "in this run: get 21 (ASSOCIATE_RESULT) 1 times, answered 1 times",
+    "in this run: get 27 (SUPPORTED_CHANNELS) 1 times, answered 1 times",
+    "in this run: get 43 (DRIVER_VERSION) 1 times, answered 1 times",
+    "in this run: get 44 (HARDWARE_VERSION) 1 times, answered 1 times",
+    "in this run: get 207 (CHANNELS_INFO) 1 times, answered 1 times",
+    "in this run: get 254 (HW_SUPPORTED_CHANNELS) 1 times, answered 1 times"
+  ],
+  "log": [
+    "station says: scan_done, 0",
+    "kev_post: SCAN_DONE vendor=1 class=6 subclass=1 code=10 dv0=en0 dv1=0B",
+    "station says: join_done, 80",
+    "kev_post: ASSOC_DONE vendor=1 class=6 subclass=1 code=9 dv0=en0 dv1=0B",
+    "ioctl: gets 43 (DRIVER_VERSION) value=0 req_len=0 -> answered [driver/hw name (256B)]",
+    "ioctl: gets 44 (HARDWARE_VERSION) value=0 req_len=0 -> answered [driver/hw name (256B)]",
+    "ioctl: gets 12 (CARD_CAPABILITIES) value=0 req_len=0 -> answered [capabilities 13B: 4c460a00000000000000000000]",
+    "ioctl: gets 19 (POWER) value=0 req_len=0 -> answered [power: version=1 radios=1 state={1,0,0,0}]",
+    "ioctl: gets 15 (OP_MODE) value=1 req_len=0 -> answered [op_mode=station(1)]",
+    "ioctl: gets 27 (SUPPORTED_CHANNELS) value=0 req_len=0 -> answered [supported channels count=6 (4824B)]",
+    "ioctl: gets 254 (HW_SUPPORTED_CHANNELS) value=0 req_len=0 -> answered [supported channels count=6 (4824B)]",
+    "ioctl: gets 207 (CHANNELS_INFO) value=0 req_len=0 -> answered [channels_info count=6 (10016B)]",
+    "ioctl: gets 13 (STATE) value=0 req_len=0 -> answered [state=0]",
+    "ioctl: gets 1 (SSID) value=0 req_len=0 -> refused(6) [not joined -> ENXIO]",
+    "ioctl: gets 9 (BSSID) value=0 req_len=0 -> refused(6) [not joined -> ENXIO]",
+    "ioctl: gets 16 (RSSI) value=0 req_len=0 -> refused(6) [not joined -> ENXIO]",
+    "ioctl: sets 10 (SCAN_REQ) value=0 req_len=5456 -> answered [scan requested]",
+    "ioctl: gets 11 (SCAN_RESULT) value=0 req_len=0 -> refused(5) [scan result: none (EIO)]",
+    "ioctl: sets 20 (ASSOCIATE) value=0 req_len=592 -> answered [associate request accepted (result via event)]",
+    "ioctl: gets 21 (ASSOCIATE_RESULT) value=0 req_len=0 -> answered [assoc_result=0]"
+  ]
+}
