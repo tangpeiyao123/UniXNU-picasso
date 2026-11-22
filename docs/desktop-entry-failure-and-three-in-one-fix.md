@@ -11,7 +11,7 @@
 - 设备：Redmi K30i（picasso / SM7250），设备 UUID `0EBB496E-FB09-4223-991E-22007B6FACD1`。
 - 仓库：`tangpeiyao123/UniXNU-picasso` 分支 `upstream-latest-20261118`（`YinCQL/UniXNU-picasso` 的 fork）。
 - **userdata 分区红线**：root image 在相对偏移 `REL 0..2045951`，Data overlay 在 `REL 6941530+`。seed/setup 类镜像**绝不能** `flash userdata` 到偏移 0——会覆盖 root，直接变砖起不来。曾经踩过，靠重刷 `userdata-root.sparse.img`（11/11 chunk，RC=0）救回。
-- 所有验证阶段的镜像都只用 `fastboot boot`（只写 RAM，重启即回滚）；固化 `flash boot` 是最后一件事，且必须在临时引导验证通过、独立评审之后。
+- 所有验证阶段的镜像先用 `fastboot boot`（只写 RAM，重启即回滚）；固化 `flash boot` 放在最后，且必须在临时引导验证通过、独立评审之后。本次已于 09:35 完成固化（见第 6 节末）。
 
 ---
 
@@ -170,7 +170,7 @@ PR#25 后 `build-kernel-linux.yml` 必填 `compose_run_id`：kernel 消费**同 
 
 ---
 
-## 6. 真机验证结果（临时引导，未 flash）
+## 6. 真机验证结果（临时引导，随后已固化）
 
 设备 `bed01658`，fastboot `getvar product` 两次 RC=0；`fastboot boot` RC=0。串口日志 `docs/evidence/` 同类证据可参考本次 `D:/k30i-gpu/capture-threeinone/console-20261122-092228.log`。
 
@@ -233,4 +233,12 @@ PR#25 后 `build-kernel-linux.yml` 必填 `compose_run_id`：kernel 消费**同 
 
 补充提交：`be2744d`（GPU+ADSP profile）、`739bc23`（merge PR#25）、`5edbfcd`（诊断期上传路径）、`9a20d64`（host 持久化测试对齐运行时几何，仅测试/workflow，不动运行代码）。后两个是诊断/回归修正，不改变 boot 产物。
 
-> 状态注记：截至 2026-11-22 09:30，三项合一镜像仍只是 `fastboot boot` 临时验证通过，**尚未 flash 固化**。固化需在独立评审后执行 `fastboot flash boot <镜像>`（只写 boot，不碰 userdata），并以 RC=0 + host sha 回读 + reboot 后重新进桌面三判据验收。
+> 状态注记（已更新）：2026-11-22 09:23 三项合一镜像先经 `fastboot boot` 临时验证通过；经独立评审后于 **09:35 执行 `fastboot flash boot` 完成固化**（只写 boot，未碰 userdata/分区表）。
+>
+> **固化验收（reboot 后串口 `D:/k30i-gpu/capture-flash-final/console-20261122-093517.log`）**：
+> - `flash boot` RC=0（100444 KB，2.5s）；host 侧镜像 sha 回读仍为 `2b60313ff41dda4fc184ea2e26f595f345ff10003912a49c0c95f7264b2c6884`；`fastboot reboot` RC=0。
+> - 固化后从 boot 分区冷启动再次进桌面：`PICASSO_DATA_INIT phase=2/complete=1`、`NATIVE_OWNER_DATA done stage=4 error=0 path=/dev/disk5s1`、`PICASSO_EXEC ok pid=1 /sbin/launchd`、`pid=26 SpringBoard` + 注入库 `metrics=installed`；0 真 panic / 0 root mount failed / 0 refused state=4。
+> - 三项功能固化后仍生效：GPU `direct scanout on bank=2` + `ACCEL published=0`；音频 `firmware error=0 / validated=1 / pas=1`、`observed ready=1 glink_error=0`；蓝牙 `power=1 result=0 baud=3000000`。用户实机确认声音/流畅度/蓝牙均正常。
+> - 回滚物料仍在 `D:/k30i-backup/`：`boot-author-final-uuid.img`（sha `ea4b934b…`，上版稳定）、`boot-x190-0EBB496E.img`、`boot-stock.img`；如需回滚只需 `fastboot flash boot <回滚镜像>`。
+>
+> **CPU 调度问题专项**：历史样本（`sample-healthy.log`/`sample-plus6.log`，11-13）里 `PICASSO_CPUFREQ gov` 的 `d2`（大核簇，CPU6/7）`busy=100` 持续 45/45 次采样全部满载；本次三项合一（临时+固化）d2 均值约 30~60%、最高 82~89%、0 次满载。注意 `busy=` 是 domain/簇级占空比而非单核精确利用率，结论限于"大核簇不再持续 100%"；负载下降最可能与 GPU 零拷贝直出参数（`scanout=2`/`glwait=0`）相关，属相关性推断。
