@@ -25,8 +25,8 @@ GPU_FILES = {
     'addons/NativeAdrenoMetal.clients': 0o644,
 }
 GPU_ARGS = ['sheng-gpu=4', 'sheng-gpu-metal=1', 'sheng-gpu-addon=1',
-            'sheng-dpu-scanout=0', 'sheng-gpu-perf-index=4', 'sheng-gpu-gl=1',
-            'glwait=1', 'glhooks=1']
+            'sheng-dpu-scanout=2', 'sheng-gpu-perf-index=4', 'sheng-gpu-gl=1',
+            'glwait=0', 'glhooks=1']
 PAYLOAD_MIB = 80
 # Physical touch remains enabled. Only synthetic swipe repetition, the redundant
 # touch-HID default and the boot-logo hold are omitted from this playback image.
