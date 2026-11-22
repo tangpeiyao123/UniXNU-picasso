@@ -58,7 +58,7 @@ PICASSO_NETWORK stack_open pid=34 type=0 error=0 result=e00002c2 client=0
 ## 3. 误区清单（最值得后来者读的部分）
 
 1. **把 `stack load=0` 读成"加载失败"** —— 错。0 是 `kIOReturnSuccess`。这是最容易犯、且已经犯过一次的错。
-2. **以为"给 sandbox grant 加 configd"能修 e00002c2** —— 错。两重理由：(a) `error=0` 不是"MACF 通过"的证据，它只是 `err` 从未被赋值；MACF 拒绝会发生在本仓 patch 的 `!native_sandbox_grant && mac_iokit_check_open_service != 0` 分支，返回 `kIOReturnNotPermitted` 并打印 `service_mac_denied=1`，日志里都没有。(b) 真正返回 `kIOReturnBadArgument` 的是 `IOService::newUserClient → initWithTask`，在 `native_sandbox_grant` 逻辑之后，加 grant 完全不触及该路径。即便能走到后面的 sandbox filter（`io_filter_resolver`），那也是 `res=kIOReturnNotPermitted`，不是这里的 `e00002c2`。
+2. **以为"给 sandbox grant 加 configd"能修 e00002c2** —— 错。三重理由：(a) `error=0` 不是"MACF 通过"的证据，它只是 `err` 从未被赋值；MACF 拒绝会发生在本仓 patch 的 `!native_sandbox_grant && mac_iokit_check_open_service != 0` 分支，返回 `kIOReturnNotPermitted` 并打印 `service_mac_denied=1`，日志里都没有。(b) `native_sandbox_grant` 的实现（上游 `patches/xnu/zzw-native-adreno-sandbox-grant.patch:14-37`）读 service 的 `NativeSandboxGrantProcess` 字符串属性，按 `proc_selfname()` 前 16 字符逐项字面比较——它只替代 MACF 沙箱判定，位置在 `newUserClient` 之前，加不加都不改变本次已通过的 MACF 结果。(c) 真正返回 `kIOReturnBadArgument` 的是 `IOService::newUserClient → initWithTask`，在 grant 逻辑之后、与之无关；即便走到更后面的 sandbox filter（`io_filter_resolver`），那里的失败码是 `kIOReturnNotPermitted`，也不是 `e00002c2`。
 3. **以为"配置 stage=5"是失败码** —— 错。源码 `stage = error ? 2 : 5`，stage=5 正是成功。
 4. **以为"消除了 e00002c2 = 能上网"** —— 大错。作者文档明说 open 成功也不合成 interface/MAC/QUIET/COMPLETE，不等于有网（见第 5 节）。
 5. **以为"启用 wifid 就能修网络等待"** —— 错。`docs/picasso-wlan-bringup.md:56-57` 明确：About 页网络等待要独立从 configd/InterfaceNamer 诊断，单独开 wifid 修不了驱动层缺口。
