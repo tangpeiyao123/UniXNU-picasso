@@ -338,15 +338,30 @@ def build_wlan(record: dict):
     out = ROOT / 'build/native-wlan'
     out.mkdir(parents=True, exist_ok=True)
     driver = ROOT / 'drivers/NativeWlan'
+    package = ROOT / 'package'
+    # Step 1 probe/parsers live under drivers/NativeWlan. The step 2/3/4
+    # injected skeletons live under package/ and are pure freestanding C++
+    # (no host-only headers); include both trees so force_load brings all
+    # six objects into the kernel. L1 only: these have no in-kernel caller
+    # yet -- linking is presence, NOT a working WLAN driver.
+    sources = [
+        (driver / 'WlanBoard.cpp', False),
+        (driver / 'WlanProbe.cpp', False),
+        (driver / 'WlanFirmware.c', True),
+        (package / 'PicassoWlanModemPil.cpp', False),
+        (package / 'PicassoWlanWlfw.cpp', False),
+        (package / 'PicassoWlanSnoc.cpp', False),
+    ]
     objects = []
-    for name in ('WlanBoard.cpp', 'WlanProbe.cpp', 'WlanFirmware.c'):
-        obj = out / (Path(name).stem + '.o')
-        compile_file(driver / name, obj, record, ['-I', str(driver)], is_c=name.endswith('.c'))
+    includes = ['-I', str(driver), '-I', str(package)]
+    for src, is_c in sources:
+        obj = out / (src.stem + '.o')
+        compile_file(src, obj, record, includes, is_c=is_c)
         objects.append(obj)
     archive = out / 'libNativeWlan.a'
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True)
-    print('NativeWlan: bounded SM7250 probe archive built')
+    print('NativeWlan: probe + step2/3/4 injected skeletons archive built (%d objects)' % len(objects))
 
 
 def main():
