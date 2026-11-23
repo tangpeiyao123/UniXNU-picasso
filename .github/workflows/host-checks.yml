@@ -174,6 +174,26 @@ jobs:
                 (r['firmware_present'], r['skipped']))
           PY
 
+      - name: Check WiFi modem PIL skeleton (step2, offline)
+        run: |
+          # The step-2 pil_modem state machine runs the real boot ordering with
+          # injected boundaries (no SMC/MPSS). Source-text pins forbid ADSP
+          # constants and step-3/4 symbols. CI has no private blobs: the real
+          # firmware load-plan run is honestly skipped, but state-machine modes
+          # and source pins always execute.
+          python3 scripts/check-picasso-wlan-modem-pil.py --output out/picasso/host-checks/wlan-modem-pil
+          cp out/picasso/host-checks/wlan-modem-pil/results.json out/picasso/logs/wlan-modem-pil-host.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r = json.loads(Path('out/picasso/host-checks/wlan-modem-pil/results.json').read_text())
+          assert r.get('hardware_tested') is False, 'skeleton must never claim hardware testing'
+          assert r.get('runs') and len(r['runs']) >= 24, 'state-machine modes did not all run'
+          assert 'skipped' in r and 'passed' in r, 'missing skip/pass state'
+          print('PIL skeleton guarded: modes=%d firmware_present=%s skipped=%s' %
+                (len(r['runs']), r['firmware_present'], r['skipped']))
+          PY
+
       - name: Check Picasso ADSP survey and firmware inputs
         run: |
           python3 scripts/check-picasso-adsp.py --output out/picasso/host-checks/adsp
