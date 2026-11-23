@@ -213,6 +213,28 @@ jobs:
                 (len(r['runs']), r['service_id_provisional']))
           PY
 
+      - name: Check WiFi SNOC/IRQ/DMA ownership skeleton (step4, offline)
+        run: |
+          # The step-4 SNOC/IRQ/DMA ownership skeleton runs with injected
+          # boundaries (no MMIO, no DMA, no real scan). Source-text pins nail
+          # the 12 first-hand SPI values from picasso.dts and forbid copying
+          # WCN6750/ath11k MSI/CE constants. CE<->SPI mapping stays provisional;
+          # scan_proven is always false and scan_preconditions_ok cannot be
+          # true while the map is unresolved.
+          python3 scripts/check-picasso-wlan-snoc.py --output out/picasso/host-checks/wlan-snoc
+          cp out/picasso/host-checks/wlan-snoc/results.json out/picasso/logs/wlan-snoc-host.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          r = json.loads(Path('out/picasso/host-checks/wlan-snoc/results.json').read_text())
+          assert r.get('hardware_tested') is False, 'skeleton must never claim hardware testing'
+          assert r.get('scan_proven') is False, 'skeleton must never claim a real scan'
+          assert r.get('ce_map_provisional') is True, 'CE/SPI map must stay provisional'
+          assert r.get('runs') and len(r['runs']) >= 22, 'SNOC modes did not all run'
+          print('SNOC skeleton guarded: modes=%d scan_proven=%s' %
+                (len(r['runs']), r['scan_proven']))
+          PY
+
       - name: Check Picasso ADSP survey and firmware inputs
         run: |
           python3 scripts/check-picasso-adsp.py --output out/picasso/host-checks/adsp
