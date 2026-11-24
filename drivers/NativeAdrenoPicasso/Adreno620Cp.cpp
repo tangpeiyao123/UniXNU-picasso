@@ -505,6 +505,16 @@ void scmProbe()
         const ScmReply modem = probeCall(kStdSipSmc64 | (0x02u << 8) | 0x07u,
             0x01u, 0x01u);
         printf("PICASSO_GPU scm: pas-supported(1) a0=%08x a1=%08x\n", modem.a0, modem.a1);
+        /* Stage-1 WLAN gate: PAS id 4 is pil_modem (MPSS, carries the WLAN
+         * firmware) on this board. Same read-only PAS_IS_SUPPORTED encoding,
+         * no memory write and no GPU state touched. a0==0 means the PIL
+         * service accepts pas 4; a non-zero answer stops the stage-1 adapter
+         * before any PAS cmd1/2/5 write. The existing 13/1 probes above are
+         * untouched. */
+        printf("PICASSO_GPU scm: calling pas-supported(4)\n");
+        const ScmReply mpss = probeCall(kStdSipSmc64 | (0x02u << 8) | 0x07u,
+            0x01u, 0x04u);
+        printf("PICASSO_GPU scm: pas-supported(4) a0=%08x a1=%08x\n", mpss.a0, mpss.a1);
     }
     /* wf115 measured what happens when the AP touches the crypto engine while
      * its NoC path has no vote: the qcrypto@1de0000 register read took an
@@ -2329,6 +2339,56 @@ bool acquireBuffers()
 
 } // namespace
 
+// ---- Stage-1 WLAN PAS transport (single SMC encoding source) --------------
+// These wrappers are the ONLY bridge a different translation unit (the WLAN
+// stage-1 adapter) gets to scmSipCall. First/first-session semantics mirror
+// the proven GPU ZAP pasCall and ADSP adspScm paths: first=true masks NS
+// interrupt delivery around the first attempt only, arg6 is the interrupted
+// secure-session id from x6 and is passed back verbatim on resume. No new SMC
+// encoding and no inline asm is added by the adapter.
+extern "C" PicassoPasReply picasso_pas_device_call(void *, uint32_t function,
+    uint32_t arginfo, uint64_t pasId, uint64_t address, uint64_t bytes,
+    uint64_t arg6, bool first)
+{
+    uint64_t pmr = 0, daif = 0;
+    if (first) {
+        __asm__ volatile("mrs %0, icc_pmr_el1" : "=r"(pmr));
+        __asm__ volatile("mrs %0, daif" : "=r"(daif));
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(UINT64_C(0)) : "memory");
+        __asm__ volatile("isb" ::: "memory");
+    }
+    const auto r = scmSipCall(function, arginfo, pasId, address, bytes, 0, arg6);
+    if (first) {
+        __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(pmr) : "memory");
+        __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+        __asm__ volatile("isb" ::: "memory");
+    }
+    return {r.a0, r.a1, r.a2, r.a3, r.a6};
+}
+extern "C" void picasso_pas_device_delay(void *, unsigned ms) { IOSleep(ms); }
+
+// Read-only PAS_IS_SUPPORTED(4) for the adapter's manual trigger. Encoding is
+// byte-for-byte the existing scmProbe() 13/1 probe: STD SMC64 SIP owner 2,
+// SVC_PIL(0x02) cmd 0x07 (PAS_IS_SUPPORTED), ARGS(1)=pas id 4. Same lease and
+// interrupted-session retry as scmProbe's probeCall; no device memory write.
+extern "C" int picasso_pas4_supported_probe(uint32_t *outA1)
+{
+    if (outA1) *outA1 = 0;
+    if (picasso_pas_acquire()) return -115;
+    struct Lease { bool uncertain = false; ~Lease() { picasso_pas_release(uncertain); } } lease;
+    constexpr uint32_t kStdSipSmc64 = 0x40000000u | 0x02000000u;
+    const uint32_t function = kStdSipSmc64 | (0x02u << 8) | 0x07u;
+    auto reply = scmSipCall(function, 0x01u, 0x04u);
+    for (unsigned i = 0; reply.a0 == 1 && i < 64; ++i) {
+        IOSleep(1);
+        reply = scmSipCall(1, 0x01u, 0x04u, 0, 0, 0, reply.a6);
+    }
+    if (reply.a0 == 1) lease.uncertain = true;
+    if (outA1) *outA1 = reply.a1;
+    return int(reply.a0);
+}
+
 extern "C" int picasso_rpmh_active_write(uint32_t address, uint32_t value)
 {
     if (!rpmhEnter()) return -16;
@@ -2382,6 +2442,51 @@ extern "C" int picasso_rpmh_adsp_resources(PicassoArcResource rails[3])
     if (db.keep) db.keep->release();
     if (copy) IOFree(copy, kRpmhCmdDbBytes);
     printf("PICASSO_ADSP rpmh stage=plan error=%d vote_sent=0 pending=pas-lifecycle\n", error);
+    return error;
+}
+
+// Stage-1 WLAN: MSS proxy rails vdd_cx / vdd_mss (DTB /soc/qcom,mss@4080000),
+// resolved from the same immutable cmd-db snapshot the ADSP owner reads.
+// Deliberately NOT lcx.lvl / lmx.lvl / xo.lvl -- those are the ADSP/WCSS
+// 5-rail set, and a wrong-rail vote has an SError/kill-boot precedent here.
+// Minimum level is device-validated: DTB vdd 384000 uV => level 384 (mV scale
+// used by the a6xx cmd-db table). A failed lookup is returned to the adapter
+// as a fail-stop errno; no level is ever guessed.
+constexpr uint32_t kWlanModemRailMinimumMv = 384;
+extern "C" int picasso_rpmh_modem_resources(PicassoArcResource rails[2])
+{
+    if (!rails) return -22;
+    Mapping db = {};
+    auto *copy = static_cast<uint8_t *>(IOMalloc(kRpmhCmdDbBytes));
+    int error = -12;
+    if (copy && mapPhysical(kRpmhCmdDbBase, kRpmhCmdDbBytes, db)) {
+        for (unsigned i = 0; i < kRpmhCmdDbBytes; i += 4) {
+            uint32_t w = read32(db, i);
+            for (unsigned j = 0; j < 4; ++j) copy[i + j] = uint8_t(w >> (8 * j));
+        }
+        barrier();
+        error = 0;
+        for (unsigned i = 0; i < kRpmhCmdDbBytes; i += 4)
+            if (picasso_db32(copy + i) != read32(db, i)) { error = -11; break; }
+        const char *names[2] = {"vdd_cx", "vdd_mss"};
+        for (unsigned i = 0; !error && i < 2; ++i) {
+            error = picasso_arc_lookup(copy, kRpmhCmdDbBytes, names[i],
+                                       kWlanModemRailMinimumMv, &rails[i]);
+            printf("PICASSO_WLAN rpmh resource=%s error=%d address=%x index=%u level=%u vote_sent=0\n",
+                   names[i], error, rails[i].address, rails[i].index, rails[i].level);
+        }
+        // Same boot-floor policy as the ADSP owner: retain the highest
+        // supported level so an inherited higher vote is never lowered.
+        for (unsigned i = 0; !error && i < 2; ++i) {
+            error = picasso_arc_lookup(copy, kRpmhCmdDbBytes, names[i],
+                                       UINT32_MAX - 1, &rails[i]);
+            if (!error && rails[i].level < kWlanModemRailMinimumMv) error = -34;
+        }
+        if (!error && rails[0].address == rails[1].address) error = -22;
+    }
+    if (db.keep) db.keep->release();
+    if (copy) IOFree(copy, kRpmhCmdDbBytes);
+    printf("PICASSO_WLAN rpmh stage=plan error=%d vote_sent=0 pending=pas-lifecycle\n", error);
     return error;
 }
 

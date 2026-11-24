@@ -338,30 +338,54 @@ def build_wlan(record: dict):
     out = ROOT / 'build/native-wlan'
     out.mkdir(parents=True, exist_ok=True)
     driver = ROOT / 'drivers/NativeWlan'
-    package = ROOT / 'package'
-    # Step 1 probe/parsers live under drivers/NativeWlan. The step 2/3/4
-    # injected skeletons live under package/ and are pure freestanding C++
-    # (no host-only headers); include both trees so force_load brings all
-    # six objects into the kernel. L1 only: these have no in-kernel caller
-    # yet -- linking is presence, NOT a working WLAN driver.
+    # The prepared tree is upstream UniXNU + committed patches: unixnu --prepare
+    # never copies this device checkout's package/ into it (see policy_candidates'
+    # note: only drivers/, kits/, patches/ and refer/ are linked from the device
+    # repository). CI run 45336844470 proved this: archive-08 failed on the
+    # missing tree/package/PicassoWlanModemPil.cpp. Resolve board-owned sources
+    # and headers through UNIXNU_DEVICE first, falling back to the tree for
+    # local development where both live at ROOT.
+    device = Path(os.environ.get('UNIXNU_DEVICE', ROOT))
+    board_package = device / 'package'
+    tree_package = ROOT / 'package'
+
+    def board_source(name):
+        candidate = board_package / name
+        return candidate if candidate.is_file() else tree_package / name
+
+    # Step 1 probe/parsers and the step 2/3/4 injected skeletons are pure
+    # freestanding C++. The stage-1 adapter is the first in-kernel caller.
     sources = [
         (driver / 'WlanBoard.cpp', False),
         (driver / 'WlanProbe.cpp', False),
         (driver / 'WlanFirmware.c', True),
-        (package / 'PicassoWlanModemPil.cpp', False),
-        (package / 'PicassoWlanWlfw.cpp', False),
-        (package / 'PicassoWlanSnoc.cpp', False),
+        (board_source('PicassoWlanModemPil.cpp'), False),
+        (board_source('PicassoWlanWlfw.cpp'), False),
+        (board_source('PicassoWlanSnoc.cpp'), False),
+        (board_source('PicassoWlanStage1Adapter.cpp'), False),
     ]
     objects = []
-    includes = ['-I', str(driver), '-I', str(package)]
+    # Device copies precede tree copies so the patched PicassoPas.h (with
+    # picasso_pas_execute_ex) and the modem pin profile win over any upstream
+    # version. Duplicate -I entries are harmless when device == ROOT locally.
+    includes = ['-I', str(board_package)]
+    for directory in ('drivers/NativeWlan', 'drivers/NativeUfs',
+                      'drivers/NativeAdrenoPicasso'):
+        includes += ['-I', str(device / directory)]
+    includes += ['-I', str(driver)]
+    for directory in ('drivers/NativeUfs', 'drivers/NativeAdrenoPicasso'):
+        includes += ['-I', str(ROOT / directory)]
+    includes += ['-I', str(tree_package)]
     for src, is_c in sources:
+        if not src.is_file():
+            raise SystemExit(f'NativeWlan source missing: {src} (UNIXNU_DEVICE={device})')
         obj = out / (src.stem + '.o')
         compile_file(src, obj, record, includes, is_c=is_c)
         objects.append(obj)
     archive = out / 'libNativeWlan.a'
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True)
-    print('NativeWlan: probe + step2/3/4 injected skeletons archive built (%d objects)' % len(objects))
+    print('NativeWlan: probe + stage1 adapter archive built (%d objects)' % len(objects))
 
 
 def main():

@@ -130,4 +130,11 @@ extern "C" int picasso_rpmh_adsp_plan(void);
 extern "C" int picasso_rpmh_adsp_resources(PicassoArcResource rails[3]);
 extern "C" int picasso_rpmh_crypto_ready(void);
 extern "C" int picasso_rpmh_active_write(uint32_t address, uint32_t value);
+// Modem (PAS 4) MSS proxy rails. Same immutable cmd-db snapshot + arc lookup
+// policy as picasso_rpmh_adsp_resources, but resolves vdd_cx / vdd_mss from
+// /soc/qcom,mss@4080000 -- NEVER the ADSP/WCSS 5-rail set (lcx/lmx/xo), whose
+// wrong-rail votes have an SError/kill-boot precedent. The minimum level is
+// device-validated (DTB vdd 384000 uV); lookup failure returns an errno and
+// the caller must stop rather than guess a level.
+extern "C" int picasso_rpmh_modem_resources(PicassoArcResource rails[2]);
 #endif

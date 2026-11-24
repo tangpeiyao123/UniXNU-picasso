@@ -63,4 +63,16 @@ static inline int picasso_pas_execute(const PicassoPasIo *io, unsigned command,
 extern "C" int picasso_pas_acquire(void);
 extern "C" void picasso_pas_release(bool uncertain);
 extern "C" int picasso_pas_adsp(unsigned command, uint64_t address, uint64_t bytes);
+
+// Production PAS transport wrappers, defined in Adreno620Cp.cpp immediately
+// after the single SMC encoding source scmSipCall. They forward every call to
+// scmSipCall (x0..x7 + the x6 interrupted-session quirk) with the SAME
+// encoding the GPU ZAP path uses: first=true masks NS interrupts for the first
+// attempt only, arg6 is the interrupted-session id returned in x6. An adapter
+// in another translation unit builds PicassoPasIo{nullptr, ...} from these;
+// it never duplicates the inline SMC assembly.
+extern "C" PicassoPasReply picasso_pas_device_call(void *, uint32_t function,
+    uint32_t arginfo, uint64_t pasId, uint64_t address, uint64_t bytes,
+    uint64_t arg6, bool first);
+extern "C" void picasso_pas_device_delay(void *, unsigned ms);
 #endif
