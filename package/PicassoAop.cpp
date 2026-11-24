@@ -7,7 +7,6 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <kern/clock.h>
-#include <stdio.h>
 #include "PicassoQmp.h"
 #include "PicassoAdspBoot.h"
 
@@ -83,6 +82,15 @@ namespace {
 // session is held open for boot.
 enum { AopImageAdsp = 0, AopImageModem = 1, AopImageCount = 2 };
 static const char *const aopImageNames[AopImageCount] = {"adsp", "mss"};
+// Static message literals: zero-padded at compile time (no stack garbage in
+// the QMP descriptor) and no snprintf dependency in the -ffreestanding ARM
+// build. Index [image][on?0:1].
+static const char *const aopLoadMessages[AopImageCount][2] = {
+    {"{class: image, res: load_state, name: adsp, val: on}",
+     "{class: image, res: load_state, name: adsp, val: off}"},
+    {"{class: image, res: load_state, name: mss, val: on}",
+     "{class: image, res: load_state, name: mss, val: off}"},
+};
 struct ImageLoad { bool attempted, on; };
 struct LoadState {
     IOMemoryMap *ram, *ipcc;
@@ -160,13 +168,9 @@ int load_state_indexed(unsigned idx, bool on) {
         }
     } else if (!img.on) { result = -22; goto out; }
     {
-        // QMP writes the whole descriptor extent; zero-fill so no stack
-        // garbage reaches the mailbox (string literals were zero-padded,
-        // snprintf alone is not).
-        char message[96] = {0};
-        int n = snprintf(message, sizeof message,
-            "{class: image, res: load_state, name: %s, val: %s}", name, on ? "on" : "off");
-        if (n <= 0 || n >= (int)sizeof message) { result = -7; goto out; }
+        // Static literal is zero-padded by the compiler, so no stack garbage
+        // reaches the mailbox; no snprintf in the freestanding ARM build.
+        const char *message = aopLoadMessages[idx][on ? 0 : 1];
         int state = picasso_qmp_send(&load.q, message, deadline());
         if (state == QmpSending) state = wait(&load.q);
         if (state != QmpOpen) load.uncertain = true;
