@@ -2,6 +2,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "PicassoPas.h"
 // zig c++ defines NDEBUG even at -O0, so <assert.h> is compiled out; use an
 // explicit check that can never be optimized away.
@@ -25,7 +26,8 @@ static PicassoPasReply call(void *,uint32_t fn,uint32_t info,uint64_t pas,
     if(mode==3)return {1,0,0,0,0x1234567800000000ULL+calls};
     if(mode==4)return {0,7,0,0,0};
     if(mode==5)return {uint32_t(-1),0,0,0,0};
-    assert(fn==0x42000201 && first && !session);return {};
+    // Default (mode 0) path: first call of whichever command is under test.
+    assert(fn==(addr==0x8bc18000 ? 0x42000201U : 0x42000202U) && first && !session);return {};
 }
 static void delay(void *,unsigned ms){assert(ms==1||ms==30);++delays;}
 // modem cmd1 address is the shared metadata slot (provisional, validated on device).
