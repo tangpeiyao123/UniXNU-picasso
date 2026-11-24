@@ -505,16 +505,6 @@ void scmProbe()
         const ScmReply modem = probeCall(kStdSipSmc64 | (0x02u << 8) | 0x07u,
             0x01u, 0x01u);
         printf("PICASSO_GPU scm: pas-supported(1) a0=%08x a1=%08x\n", modem.a0, modem.a1);
-        /* Stage-1 WLAN gate: PAS id 4 is pil_modem (MPSS, carries the WLAN
-         * firmware) on this board. Same read-only PAS_IS_SUPPORTED encoding,
-         * no memory write and no GPU state touched. a0==0 means the PIL
-         * service accepts pas 4; a non-zero answer stops the stage-1 adapter
-         * before any PAS cmd1/2/5 write. The existing 13/1 probes above are
-         * untouched. */
-        printf("PICASSO_GPU scm: calling pas-supported(4)\n");
-        const ScmReply mpss = probeCall(kStdSipSmc64 | (0x02u << 8) | 0x07u,
-            0x01u, 0x04u);
-        printf("PICASSO_GPU scm: pas-supported(4) a0=%08x a1=%08x\n", mpss.a0, mpss.a1);
     }
     /* wf115 measured what happens when the AP touches the crypto engine while
      * its NoC path has no vote: the qcrypto@1de0000 register read took an
@@ -2339,56 +2329,6 @@ bool acquireBuffers()
 
 } // namespace
 
-// ---- Stage-1 WLAN PAS transport (single SMC encoding source) --------------
-// These wrappers are the ONLY bridge a different translation unit (the WLAN
-// stage-1 adapter) gets to scmSipCall. First/first-session semantics mirror
-// the proven GPU ZAP pasCall and ADSP adspScm paths: first=true masks NS
-// interrupt delivery around the first attempt only, arg6 is the interrupted
-// secure-session id from x6 and is passed back verbatim on resume. No new SMC
-// encoding and no inline asm is added by the adapter.
-extern "C" PicassoPasReply picasso_pas_device_call(void *, uint32_t function,
-    uint32_t arginfo, uint64_t pasId, uint64_t address, uint64_t bytes,
-    uint64_t arg6, bool first)
-{
-    uint64_t pmr = 0, daif = 0;
-    if (first) {
-        __asm__ volatile("mrs %0, icc_pmr_el1" : "=r"(pmr));
-        __asm__ volatile("mrs %0, daif" : "=r"(daif));
-        __asm__ volatile("msr daifset, #2" ::: "memory");
-        __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(UINT64_C(0)) : "memory");
-        __asm__ volatile("isb" ::: "memory");
-    }
-    const auto r = scmSipCall(function, arginfo, pasId, address, bytes, 0, arg6);
-    if (first) {
-        __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(pmr) : "memory");
-        __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
-        __asm__ volatile("isb" ::: "memory");
-    }
-    return {r.a0, r.a1, r.a2, r.a3, r.a6};
-}
-extern "C" void picasso_pas_device_delay(void *, unsigned ms) { IOSleep(ms); }
-
-// Read-only PAS_IS_SUPPORTED(4) for the adapter's manual trigger. Encoding is
-// byte-for-byte the existing scmProbe() 13/1 probe: STD SMC64 SIP owner 2,
-// SVC_PIL(0x02) cmd 0x07 (PAS_IS_SUPPORTED), ARGS(1)=pas id 4. Same lease and
-// interrupted-session retry as scmProbe's probeCall; no device memory write.
-extern "C" int picasso_pas4_supported_probe(uint32_t *outA1)
-{
-    if (outA1) *outA1 = 0;
-    if (picasso_pas_acquire()) return -115;
-    struct Lease { bool uncertain = false; ~Lease() { picasso_pas_release(uncertain); } } lease;
-    constexpr uint32_t kStdSipSmc64 = 0x40000000u | 0x02000000u;
-    const uint32_t function = kStdSipSmc64 | (0x02u << 8) | 0x07u;
-    auto reply = scmSipCall(function, 0x01u, 0x04u);
-    for (unsigned i = 0; reply.a0 == 1 && i < 64; ++i) {
-        IOSleep(1);
-        reply = scmSipCall(1, 0x01u, 0x04u, 0, 0, 0, reply.a6);
-    }
-    if (reply.a0 == 1) lease.uncertain = true;
-    if (outA1) *outA1 = reply.a1;
-    return int(reply.a0);
-}
-
 extern "C" int picasso_rpmh_active_write(uint32_t address, uint32_t value)
 {
     if (!rpmhEnter()) return -16;
@@ -2542,6 +2482,38 @@ extern "C" int picasso_pas_adsp(unsigned command, uint64_t address, uint64_t byt
         command, error, reply.a0, reply.a1, (unsigned long long)reply.a6);
     if (error == -115) __atomic_store_n(&pasPoisoned, 1U, __ATOMIC_RELEASE);
     return error;
+}
+
+// Stage-1 WLAN PAS transport. Reuse the production ADSP SMC wrapper verbatim
+// (adspScm already carries the x0..x7 encoding, the x6 interrupted-session
+// token and the first=true PMR/DAIF masking quirk) instead of duplicating
+// inline assembly. This block sits inside the CI exports slice (between the
+// PIL-calls marker and the cp-start entry), after the adspScm definition, so
+// it is compiled by the ARM64 pas-arm.cpp model without altering the slice
+// markers or the pasCall lambda text.
+extern "C" PicassoPasReply picasso_pas_device_call(void *ctx, uint32_t function,
+    uint32_t arginfo, uint64_t pas, uint64_t address, uint64_t bytes,
+    uint64_t session, bool first)
+{
+    return adspScm(ctx, function, arginfo, pas, address, bytes, session, first);
+}
+extern "C" void picasso_pas_device_delay(void *, unsigned ms) { adspScmDelay(nullptr, ms); }
+
+// Read-only PAS_IS_SUPPORTED(pasId) gate for the manual adapter entry. Uses
+// the same scmSipCall encoding as scmProbe(13)/(1), but deliberately does NOT
+// acquire pasGate and does NOT set lease.uncertain: a probe reply must never
+// poison the shared PIL gate that GPU/ADSP rely on at boot. No device memory
+// write. A bounded resume loop returns the final a0/a1 without quarantining.
+extern "C" int picasso_pas4_supported_probe(uint32_t *outA1)
+{
+    if (outA1) *outA1 = 0;
+    constexpr uint32_t kStdSipSmc64 = 0x40000000u | 0x02000000u;
+    const uint32_t function = kStdSipSmc64 | (0x02u << 8) | 0x07u;
+    auto reply = scmSipCall(function, 0x01u, 4u);
+    for (unsigned i = 0; reply.a0 == 1 && i < 64; ++i)
+        reply = scmSipCall(1u, 0x01u, 4u, 0, 0, 0, reply.a6);
+    if (outA1) *outA1 = reply.a1;
+    return int(reply.a0);
 }
 
 extern "C" int native_adreno620_cp_start(void)
