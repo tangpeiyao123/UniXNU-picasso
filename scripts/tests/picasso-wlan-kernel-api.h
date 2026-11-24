@@ -20,3 +20,15 @@ public:
     explicit operator bool() const { return pointer != nullptr; }
     T *operator->() const { return pointer; }
 };
+
+// Stand-ins for the <kern/thread.h> and IOKit logging declarations stripped
+// from WlanProbe.cpp before the freestanding ARM64 compile. Kept in lockstep
+// with the manual stage-1 boot-arg wiring; -Werror forbids implicit decls.
+typedef struct thread *thread_t;
+typedef int wait_result_t;
+typedef int kern_return_t;
+enum { KERN_SUCCESS = 0 };
+extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
+extern "C" void thread_deallocate(thread_t);
+extern "C" void IOLog(const char *, ...) __attribute__((format(printf, 1, 2)));
+extern "C" void IOSleep(unsigned);
