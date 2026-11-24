@@ -15,6 +15,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
 #include <string.h>
 extern "C" {
 #include "WlanBoard.h"
@@ -47,6 +48,12 @@ void native_wlan_probe(void);
 // Firmware is supplied by the integrator (weak symbols or the setter); no vendor blob is stored in this tree.
 extern const uint8_t native_wlan_firmware[] __attribute__((weak_import));
 extern const uint32_t native_wlan_firmware_size __attribute__((weak_import));
+
+// Manual stage-1 adapter entries. libNativeWlan.a is force-loaded into the
+// kernel (XNU_PICASSO_WLAN=1), so weak_import is safe; both stay dormant until
+// `sheng-wlan-stage1=<n>` is passed explicitly on the boot-arg line.
+extern "C" int picasso_wlan_stage1_probe_pas4(void) __attribute__((weak_import));
+extern "C" int picasso_wlan_stage1_run(void) __attribute__((weak_import));
 }
 
 namespace {
@@ -287,6 +294,29 @@ void copyState(const struct wlan_probe_state &state) {
     native_wlan_step = state.step;
     native_wlan_error = state.error;
 }
+
+// Manual stage-1 runner. Reached ONLY via `sheng-wlan-stage1=2`. Runs off the
+// boot thread so the bounded PAS transaction cannot stall the boot monitor.
+// One-shot: a second boot-arg-triggered start is ignored. Never waits forever.
+static void stage1Thread(void *, wait_result_t) {
+    static bool started;
+    if (__atomic_exchange_n(&started, true, __ATOMIC_ACQ_REL)) {
+        IOLog("PICASSO_WLAN stage1 thread: already started, ignoring\n");
+        return;
+    }
+    if (!picasso_wlan_stage1_run) {
+        IOLog("PICASSO_WLAN stage1 thread: adapter entry not linked, stop\n");
+        return;
+    }
+    int rc = 0;
+    for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+        rc = picasso_wlan_stage1_run();
+        if (rc != -16) break;  // -16 = pasGate contention; retry with backoff
+        IOLog("PICASSO_WLAN stage1 thread: pasGate contention attempt %u/3, backing off\n", attempt);
+        if (attempt < 3) IOSleep(1000);
+    }
+    IOLog("PICASSO_WLAN stage1 thread: finished rc=%d\n", rc);
+}
 }  // namespace
 
 extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
@@ -301,6 +331,27 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 extern "C" void native_wlan_probe(void) {
     static bool surveyed;
     if (!surveyed) { surveyed=true; smemSurvey(); }
+
+    // Explicit opt-in manual stage-1 trigger. Absent (or zero) the key, the
+    // legacy `sheng-wlan` path below is completely unchanged.
+    //   1 = read-only PAS id 4 probe, synchronous, then return
+    //   2 = full adapter run on its own kernel thread, then return
+    //   >2 = ignore; never trigger any write
+    unsigned s1 = 0;
+    if (PE_parse_boot_argn("sheng-wlan-stage1", &s1, sizeof s1) && s1) {
+        if (s1 == 1) {
+            if (picasso_wlan_stage1_probe_pas4) (void)picasso_wlan_stage1_probe_pas4();
+            return;
+        }
+        if (s1 == 2) {
+            thread_t th = nullptr;
+            if (kernel_thread_start(stage1Thread, nullptr, &th) == KERN_SUCCESS)
+                thread_deallocate(th);
+            return;
+        }
+        return;  // s1 > 2: ignore, never write
+    }
+
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
     if (native_wlan_stage_req) return;
