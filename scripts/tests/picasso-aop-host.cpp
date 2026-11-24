@@ -14,6 +14,7 @@ static bool stalled,closeStalled,opened;
 static bool messages,sendStalled,disconnect;
 static unsigned consumed;
 static const char *expectName = "adsp";  // PA-1: which image name to expect in the message
+static const char *expectVal = "on";     // PA-1: explicit on/off; global consumed no longer implies val
 enum {kIOMapAnywhere=1,kIOMapInhibitCache=2,OSNoRetain=0,kSecondScale=1};
 class IOMemoryMap {
 public:
@@ -60,7 +61,7 @@ static void IOSleep(unsigned n) {
         const char *text=reinterpret_cast<const char *>(ram)+0x204;
         char expected[96];
         snprintf(expected, sizeof expected,
-            "{class: image, res: load_state, name: %s, val: %s}", expectName, consumed ? "off" : "on");
+            "{class: image, res: load_state, name: %s, val: %s}", expectName, expectVal);
         assert(!strcmp(text,expected));
         for(unsigned i=unsigned(strlen(expected));i<96;++i)assert(!text[i]);
         if(disconnect){ram[3]=0xffff0000;ram[0x200/4]=0;return;}
@@ -84,21 +85,24 @@ int main(int argc,char **argv) {
         if(busy)ram[0x200/4]=96;
         if(rx)ram[0x100/4]=4;
         if(bad)ram[14]=60;
+        expectVal="on";
         int on=picasso_aop_load_state(true);
         if(mapFail||busy||rx||bad){assert(on<0 && !consumed && unmaps==mappings-!!failMap);assert(!picasso_aop_finish());}
         else if(timeout||disconnect||handshake){
             assert(on==-115 && !consumed && !unmaps);
+            expectVal="off";
             assert(picasso_aop_load_state(false)==-115 && picasso_aop_finish()==-115);
             if(timeout)assert(ram[0x200/4]==96);
         } else {
-            assert(!on && consumed==1 && !unmaps && load.on);
+            assert(!on && consumed==1 && !unmaps && load.image[AopImageAdsp].on);
             assert(picasso_aop_load_state(true)==-16);
             assert(picasso_aop_finish()==-115); // Cannot close a live on request.
             sendStalled=offTimeout;
+            expectVal="off";
             int off=picasso_aop_load_state(false);
             if(offTimeout){assert(off==-115 && !unmaps && consumed==1 && ram[0x200/4]==96);}
             else {
-                assert(!off && consumed==2 && !load.on);closeStalled=closing;
+                assert(!off && consumed==2 && !load.image[AopImageAdsp].on);closeStalled=closing;
                 int end=picasso_aop_finish();
                 if(closing)assert(end<0 && !unmaps && load.uncertain);
                 else assert(!end && unmaps==2 && !load.ram && !picasso_aop_finish());
@@ -113,19 +117,20 @@ int main(int argc,char **argv) {
     // with name "mss" and must NOT get -16 from a per-image attempted guard.
     if(!strcmp(mode,"dual")) {
         messages=true;
-        expectName="adsp";
+        expectName="adsp"; expectVal="on";
         assert(!picasso_aop_load_state(true));           // adsp on, consumed=1
         assert(consumed==1 && load.image[0].on && !load.image[1].on);
         assert(picasso_aop_load_state(true)==-16);        // same image still -16
-        expectName="mss";
+        expectName="mss"; expectVal="on";
         assert(!picasso_aop_load_state_modem(true));      // modem on, consumed=2, NOT -16
         assert(consumed==2 && load.image[0].on && load.image[1].on);
         assert(picasso_aop_load_state_modem(true)==-16);  // modem repeat -16
         assert(picasso_aop_finish()==-115);               // cannot close with images on
+        expectName="mss"; expectVal="off";
         assert(!picasso_aop_load_state_modem(false));     // modem off, consumed=3
         assert(consumed==3 && load.image[0].on && !load.image[1].on);
         assert(picasso_aop_finish()==-115);               // adsp still on
-        expectName="adsp";
+        expectName="adsp"; expectVal="off";
         assert(!picasso_aop_load_state(false));           // adsp off, consumed=4
         assert(consumed==4 && !load.image[0].on && !load.image[1].on);
         assert(!picasso_aop_finish());                    // all off -> close ok

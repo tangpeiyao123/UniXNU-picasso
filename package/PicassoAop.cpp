@@ -132,9 +132,13 @@ int load_state_indexed(unsigned idx, bool on) {
     int result = 0;
     if (load.uncertain) { result = -115; goto out; }
     if (on) {
+        // A repeated on for the same image is a caller error (matches the
+        // pre-PA-1 singleton: load.attempted -> -16). Reject before sending a
+        // second message on the shared channel.
+        if (img.attempted) { result = -16; goto out; }
         // The session is opened once and shared; a second image only sends its
         // own load_state message on the already-open channel.
-        if (!img.attempted) {
+        {
             img.attempted = true;
             if (!load.q.owned) {
                 load.ram=aopMap(0x0c300000);load.ipcc=aopMap(0x00408000);
@@ -156,7 +160,10 @@ int load_state_indexed(unsigned idx, bool on) {
         }
     } else if (!img.on) { result = -22; goto out; }
     {
-        char message[96];
+        // QMP writes the whole descriptor extent; zero-fill so no stack
+        // garbage reaches the mailbox (string literals were zero-padded,
+        // snprintf alone is not).
+        char message[96] = {0};
         int n = snprintf(message, sizeof message,
             "{class: image, res: load_state, name: %s, val: %s}", name, on ? "on" : "off");
         if (n <= 0 || n >= (int)sizeof message) { result = -7; goto out; }
@@ -172,7 +179,10 @@ int load_state_indexed(unsigned idx, bool on) {
         result = state == QmpOpen ? 0 : -115;
     }
 out:
-    aopGateRelease(load.uncertain || (result && result != -22 && result != -16));
+    // Poison the shared gate only on genuine uncertainty (the session state
+    // is unknown). Ordinary rejected calls (-22 arg, -16 repeat, -12 map,
+    // -5/-7 setup) are well-defined failures and must not wedge the gate.
+    aopGateRelease(load.uncertain);
     return result;
 }
 }  // namespace
