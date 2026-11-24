@@ -44,7 +44,8 @@ def main():
             cases = ('normal',) if name == 'qmp' else (
                 'normal', 'alloc-ram', 'alloc-ipcc', 'map-ram', 'map-ipcc', 'timeout', 'close-timeout', 'bad', 'busy', 'rx',
                 'load-normal','load-timeout','load-off-timeout','load-close-timeout','load-busy','load-rx',
-                'load-bad','load-map','load-handshake-timeout','load-disconnect')
+                'load-bad','load-map','load-handshake-timeout','load-disconnect',
+                'dual')  # PA-1: two images (adsp+modem) share one QMP session
             for case in cases:
                 run(name + '-' + case + suffix, [str(exe), case])
     arm = out/'aop-arm.cpp'

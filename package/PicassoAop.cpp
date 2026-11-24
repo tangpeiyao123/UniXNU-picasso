@@ -7,6 +7,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <kern/clock.h>
+#include <stdio.h>
 #include "PicassoQmp.h"
 #include "PicassoAdspBoot.h"
 
@@ -75,55 +76,134 @@ extern "C" int picasso_aop_probe(void) {
 }
 
 namespace {
+// One physical AOP mailbox / one QMP session, shared by multiple subsystems
+// (adsp and modem) via the image's `name:` field. Per-image load_state flags;
+// session state (q/context/mappings/uncertain) stays shared. Do NOT open a
+// second QMP session: this implementation is single-channel and the ADSP
+// session is held open for boot.
+enum { AopImageAdsp = 0, AopImageModem = 1, AopImageCount = 2 };
+static const char *const aopImageNames[AopImageCount] = {"adsp", "mss"};
+struct ImageLoad { bool attempted, on; };
 struct LoadState {
     IOMemoryMap *ram, *ipcc;
     Aop context;
     PicassoQmp q;
-    bool attempted, on, uncertain;
+    bool uncertain;
+    ImageLoad image[AopImageCount];
 };
 static LoadState load;
+// Independent serialization gate for the shared QMP session. MUST NOT reuse
+// the PAS gate: AOP load_state is called while the PAS lease is held
+// (PicassoAdspBoot.cpp:99->100 and :165-167->177-178), so acquiring pasGate
+// here would self-lock a non-recursive gate and hang the firmware worker.
+static unsigned aopGate, aopPoisoned;
+int aopGateAcquire() {
+    // Bounded wait; never spin forever. -16 = contention, -115 = poisoned.
+    for (unsigned i = 0; i < 30000; ++i) {
+        if (__atomic_load_n(&aopPoisoned, __ATOMIC_ACQUIRE)) return -115;
+        unsigned expected = 0;
+        if (__atomic_compare_exchange_n(&aopGate, &expected, 1, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 0;
+        IOSleep(1);
+    }
+    return -16;
+}
+void aopGateRelease(bool uncertain) {
+    if (uncertain) __atomic_store_n(&aopPoisoned, 1U, __ATOMIC_RELEASE);
+    __atomic_store_n(&aopGate, 0U, __ATOMIC_RELEASE);
+}
 void releaseLoad() {
     if(load.ipcc)load.ipcc->release();
     if(load.ram)load.ram->release();
     load.ipcc=load.ram=nullptr;
 }
 }
-extern "C" int picasso_aop_load_state(bool on) {
-    if (load.uncertain) return -115;
+namespace {
+// Internal per-image load_state transaction on the SHARED session. Holds the
+// independent aopGate across the whole transaction. `on` for adsp keeps the
+// exact prior QMP sequence; the modem entry uses name "mss" (validated on
+// device, NOT a proven constant).
+int load_state_indexed(unsigned idx, bool on) {
+    if (idx >= AopImageCount) return -22;
+    int error = aopGateAcquire();
+    if (error) return error;
+    const char *name = aopImageNames[idx];
+    ImageLoad &img = load.image[idx];
+    int result = 0;
+    if (load.uncertain) { result = -115; goto out; }
     if (on) {
-        if (load.attempted) return -16;
-        load.attempted=true;
-        load.ram=aopMap(0x0c300000);load.ipcc=aopMap(0x00408000);
-        load.context={load.ram?uintptr_t(load.ram->getVirtualAddress()):0,
-                      load.ipcc?uintptr_t(load.ipcc->getVirtualAddress()):0};
-        if(!load.context.ram || !load.context.ipcc){releaseLoad();return -12;}
-        QmpIo io={&load.context,aopRead,aopWrite,aopBarrier,aopKick};
-        int state=picasso_qmp_begin(&load.q,&io,0x1000,deadline());
-        if(state>=0)state=wait(&load.q);
-        if(state!=QmpOpen){
-            int closed=picasso_qmp_close(&load.q,deadline());
-            if(closed==QmpClosing)closed=wait(&load.q);
-            load.uncertain=load.q.owned;
-            if(!load.uncertain)releaseLoad();
-            return load.uncertain?-115:state<0?state:-5;
+        // The session is opened once and shared; a second image only sends its
+        // own load_state message on the already-open channel.
+        if (!img.attempted) {
+            img.attempted = true;
+            if (!load.q.owned) {
+                load.ram=aopMap(0x0c300000);load.ipcc=aopMap(0x00408000);
+                load.context={load.ram?uintptr_t(load.ram->getVirtualAddress()):0,
+                              load.ipcc?uintptr_t(load.ipcc->getVirtualAddress()):0};
+                if(!load.context.ram || !load.context.ipcc){releaseLoad();result=-12;goto out;}
+                QmpIo io={&load.context,aopRead,aopWrite,aopBarrier,aopKick};
+                int state=picasso_qmp_begin(&load.q,&io,0x1000,deadline());
+                if(state>=0)state=wait(&load.q);
+                if(state!=QmpOpen){
+                    int closed=picasso_qmp_close(&load.q,deadline());
+                    if(closed==QmpClosing)closed=wait(&load.q);
+                    load.uncertain=load.q.owned;
+                    if(!load.uncertain)releaseLoad();
+                    result=load.uncertain?-115:state<0?state:-5;
+                    goto out;
+                }
+            }
         }
-    } else if (!load.on) return -22;
-    int state=picasso_qmp_send(&load.q,on?
-        "{class: image, res: load_state, name: adsp, val: on}":
-        "{class: image, res: load_state, name: adsp, val: off}",deadline());
-    if(state==QmpSending)state=wait(&load.q);
-    if(state!=QmpOpen)load.uncertain=true;
-    else load.on=on;
-    IOLog("PICASSO_ADSP aop stage=load_state on=%u state=%d consumed=%u uncertain=%u\n",
-        on,state,state==QmpOpen,load.uncertain);
-    return state==QmpOpen?0:-115;
+    } else if (!img.on) { result = -22; goto out; }
+    {
+        char message[96];
+        int n = snprintf(message, sizeof message,
+            "{class: image, res: load_state, name: %s, val: %s}", name, on ? "on" : "off");
+        if (n <= 0 || n >= (int)sizeof message) { result = -7; goto out; }
+        int state = picasso_qmp_send(&load.q, message, deadline());
+        if (state == QmpSending) state = wait(&load.q);
+        if (state != QmpOpen) load.uncertain = true;
+        else img.on = on;
+        // Preserve the historical ADSP log prefix; modem uses its own prefix
+        // so device logs stay comparable with prior boots.
+        const char *prefix = (idx == AopImageAdsp) ? "PICASSO_ADSP" : "PICASSO_WLAN";
+        IOLog("%s aop stage=load_state image=%s on=%u state=%d consumed=%u uncertain=%u\n",
+            prefix, name, on, state, state == QmpOpen, load.uncertain);
+        result = state == QmpOpen ? 0 : -115;
+    }
+out:
+    aopGateRelease(load.uncertain || (result && result != -22 && result != -16));
+    return result;
+}
+}  // namespace
+
+extern "C" int picasso_aop_load_state(bool on) {
+    return load_state_indexed(AopImageAdsp, on);  // unchanged adsp entry
+}
+extern "C" int picasso_aop_load_state_modem(bool on) {
+    return load_state_indexed(AopImageModem, on);
 }
 extern "C" int picasso_aop_finish(void) {
-    if(load.uncertain || load.on)return -115;
-    if(!load.ram)return 0;
-    int state=picasso_qmp_close(&load.q,deadline());
-    if(state==QmpClosing)state=wait(&load.q);
-    load.uncertain=load.q.owned;
-    if(!load.uncertain)releaseLoad();
-    return state==QmpClosed?0:state;
+    int error = aopGateAcquire();
+    if (error) return error;
+    int result = 0;
+    if (load.uncertain) { result = -115; goto out; }
+    // Session close only after EVERY subsystem has turned its image off.
+    // But note: normal ADSP boot holds its image on for the whole boot, so
+    // finish() is only reached on an ADSP error-stop path; at runtime the
+    // session is intentionally kept open until reboot (mappings released by
+    // reboot), matching the prior behaviour.
+    for (unsigned i = 0; i < AopImageCount; ++i)
+        if (load.image[i].on) { result = -115; goto out; }
+    if (!load.ram) { result = 0; goto out; }
+    {
+        int state=picasso_qmp_close(&load.q,deadline());
+        if(state==QmpClosing)state=wait(&load.q);
+        load.uncertain=load.q.owned;
+        if(!load.uncertain)releaseLoad();
+        result = state==QmpClosed?0:state;
+    }
+out:
+    aopGateRelease(load.uncertain || (result && result != -115));
+    return result;
 }

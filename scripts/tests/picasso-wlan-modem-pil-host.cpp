@@ -114,11 +114,14 @@ int main(int argc, char **argv) {
     CHECK(cfg.pasId == 4 && cfg.carveoutBase == 0x8c000000ULL && cfg.carveoutBytes == 0xf800000ULL);
     CHECK(cfg.metadataBase == 0x8bc18000ULL && cfg.rails == 2 && cfg.mdtBytes == 9420);
 
+    // Stage-1 readiness no longer depends on the unresolved WLAN `wlan` bit:
+    // readiness = PAS auth ok + peer alive. "lost-ready" (peer responds but
+    // value==0) is therefore a SUCCESS case, not a failure.
     bool failure = is("fw-missing") || is("metadata-short") || is("metadata-hash") ||
         is("vote-fail") || is("lease") || is("lease-gpu") || is("lease-adsp") || is("poisoned") ||
         is("aop-fail") || is("init-fail") || is("setup-fail") || is("auth-fail") ||
         is("stale-peer") || is("fatal-peer") || is("pre-auth-peer") || is("timeout") ||
-        is("lost-ready") || is("restart");
+        is("restart");
     if (failure) CHECK(rc != 0 && st.error != 0);
 
     // Ordering invariants that must hold on EVERY path.
@@ -130,14 +133,19 @@ int main(int argc, char **argv) {
         CHECK(mem); (void)mem;
     }
 
-    if (strncmp(mode, "normal", 6) == 0 || is("no-handover")) {
+    if (strncmp(mode, "normal", 6) == 0 || is("no-handover") || is("lost-ready")) {
+        // readyBit no longer gates success: a peer that responds with value==0
+        // still counts as alive once PAS auth succeeded.
         CHECK(rc == 0 && st.ready && st.authenticated && st.released);
+        if (is("lost-ready")) CHECK(!st.handed);
         CHECK(commands[0] == 1 && commands[1] == 2 && commands[2] == 5 && commands[3] == 6);
         CHECK(pas_cmds == 4 && writes == 4 && on == 1 && off == 1);  // 2 proxy votes + 2 shutdown reasserts
         CHECK(st.partsLoaded == 32 && !st.quarantined);   // PH0..PH33 minus absent PH18/PH25.
         CHECK(!poison);
-        if (is("no-handover")) CHECK(!st.handed);
-        else CHECK(st.handed);
+        // handed is set only when the peer value carries the handover bit;
+        // no-handover (value 2) and lost-ready (value 0) both leave it clear.
+        if (is("normal")) CHECK(st.handed);
+        else CHECK(!st.handed);
     }
     if (is("lease") || is("lease-gpu") || is("lease-adsp")) {
         CHECK(rc == -16 && pas_cmds == 0);  // never issue SCM without the gate.

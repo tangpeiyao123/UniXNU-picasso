@@ -185,16 +185,23 @@ int picasso_wlan_modem_pil_execute(const struct WlanModemPilIo *io,
     if ((error = io->pas(io->context, 5, 0, 0, cfg->pasId))) goto out;
     state->authenticated = true;
 
-    // Ready poll with a bounded deadline; caller supplies the unresolved bit.
+    // Stage-1 readiness = PAS auth succeeded and the peer is alive. The WLAN
+    // SMP2P `wlan` bit semantics are NOT resolved in reviewed sources (design
+    // R4), so we deliberately do NOT gate readiness on readyBit/handoverBit.
+    // cmd5 returning 0 above set authenticated=true; here we only require a
+    // bounded liveness poll: peer responds without restart/stale-ready. A
+    // "device reset" is an on-device console observation, not a code variable.
     state->phase = "ready";
     deadline = io->now(io->context) + cfg->timeoutMs;
     do {
         struct WlanModemPeerEvent e = {0, 0, 0, 0, 0};
         error = io->poll_peer(io->context, &e);
         ++state->peerPolls;
-        if (error == 0 && e.hasValue && !e.restart && !(e.value & 1) && (e.value & cfg->readyBit)) {
+        if (error == 0 && !e.restart && !(e.hasValue && (e.value & 1))) {
+            // Peer is alive and not announcing stale/reset state. Auth already
+            // succeeded; bit-level readiness is intentionally not required.
             state->ready = true;
-            if (e.value & cfg->handoverBit) state->handed = true;
+            if (e.hasValue && (e.value & cfg->handoverBit)) state->handed = true;
             break;
         }
         io->sleep(io->context, 10);
