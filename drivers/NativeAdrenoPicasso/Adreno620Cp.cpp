@@ -2497,7 +2497,7 @@ extern "C" PicassoPasReply picasso_pas_device_call(void *ctx, uint32_t function,
 {
     return adspScm(ctx, function, arginfo, pas, address, bytes, session, first);
 }
-extern "C" void picasso_pas_device_delay(void *, unsigned ms) { adspScmDelay(nullptr, ms); }
+extern "C" void picasso_pas_device_delay(void *, unsigned ms) { IOSleep(ms); }
 
 // Read-only PAS_IS_SUPPORTED(pasId) gate for the manual adapter entry. Uses
 // the same scmSipCall encoding as scmProbe(13)/(1), but deliberately does NOT
