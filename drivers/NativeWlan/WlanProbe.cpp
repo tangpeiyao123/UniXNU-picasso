@@ -49,10 +49,11 @@ void native_wlan_probe(void);
 extern const uint8_t native_wlan_firmware[] __attribute__((weak_import));
 extern const uint32_t native_wlan_firmware_size __attribute__((weak_import));
 
-// Manual stage-1 adapter entries. libNativeWlan.a is force-loaded into the
-// kernel (XNU_PICASSO_WLAN=1), so weak_import is safe; both stay dormant until
-// `sheng-wlan-stage1=<n>` is passed explicitly on the boot-arg line.
-extern "C" int picasso_wlan_stage1_probe_pas4(void) __attribute__((weak_import));
+// Manual stage-1 adapter entry. libNativeWlan.a is force-loaded into the
+// kernel (XNU_PICASSO_WLAN=1), so weak_import is safe; it stays dormant until
+// `sheng-wlan-stage1=<n>` (non-zero) is passed explicitly on the boot-arg line.
+// run() itself begins with the read-only PAS id 4 probe and fail-stops before
+// any write, so the wiring layer deliberately does not call that probe.
 extern "C" int picasso_wlan_stage1_run(void) __attribute__((weak_import));
 }
 
@@ -332,24 +333,17 @@ extern "C" void native_wlan_probe(void) {
     static bool surveyed;
     if (!surveyed) { surveyed=true; smemSurvey(); }
 
-    // Explicit opt-in manual stage-1 trigger. Absent (or zero) the key, the
-    // legacy `sheng-wlan` path below is completely unchanged.
-    //   1 = read-only PAS id 4 probe, synchronous, then return
-    //   2 = full adapter run on its own kernel thread, then return
-    //   >2 = ignore; never trigger any write
+    // Explicit opt-in manual stage-1 trigger: ANY non-zero value starts the
+    // adapter on its own kernel thread, then returns. Absent / zero / parse
+    // failure leaves the legacy `sheng-wlan` path below completely unchanged.
+    // The adapter's run() starts with its own read-only PAS id 4 gate; no
+    // duplicate probe or write decision is made here.
     unsigned s1 = 0;
     if (PE_parse_boot_argn("sheng-wlan-stage1", &s1, sizeof s1) && s1) {
-        if (s1 == 1) {
-            if (picasso_wlan_stage1_probe_pas4) (void)picasso_wlan_stage1_probe_pas4();
-            return;
-        }
-        if (s1 == 2) {
-            thread_t th = nullptr;
-            if (kernel_thread_start(stage1Thread, nullptr, &th) == KERN_SUCCESS)
-                thread_deallocate(th);
-            return;
-        }
-        return;  // s1 > 2: ignore, never write
+        thread_t th = nullptr;
+        if (kernel_thread_start(stage1Thread, nullptr, &th) == KERN_SUCCESS)
+            thread_deallocate(th);
+        return;
     }
 
     unsigned stage = 0;
