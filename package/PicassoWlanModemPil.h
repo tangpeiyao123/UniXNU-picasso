@@ -66,6 +66,12 @@ struct WlanModemPilConfig {
     uint32_t handoverBit;
     uint32_t stopAckBit;
     uint32_t rails;          // 2 MSS proxy rails (vdd_cx, vdd_mss)
+    // Caller-supplied metadata staging buffer (>= metadataBytes). This moves the
+    // 0x3000-byte metadata out of Run's stack frame; on-device 16 KB kernel
+    // stacks otherwise overflow once chunk[4096]/buf[4096] nesting is counted.
+    // Freestanding: a plain pointer, no allocation here; host tests pass a
+    // static buffer, the in-kernel adapter passes an IOMalloc-backed buffer.
+    uint8_t *metadataBuffer;
 };
 
 // Observable state. phase/error mirror the ADSP boot contract; the boolean

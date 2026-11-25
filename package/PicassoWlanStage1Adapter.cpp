@@ -158,6 +158,11 @@ struct AdapterCtx {
     uint8_t digest[32];
     size_t digestBytes;
     uint8_t metadata[WLAN_MODEM_METADATA_BYTES];
+    // Metadata staging for the PIL state machine itself (cfg->metadataBuffer).
+    // Separate from `metadata` above, which cbReadPart uses to stage the FAT
+    // mdt before copying into the skeleton. This one lives in the IOMalloc'd
+    // AdapterCtx (heap), keeping the 0x3000-byte array off the kernel stack.
+    uint8_t pilMetadata[0x3000];
     uint32_t pieces[WLAN_MODEM_HEADERS];
     struct wlan_modem_load_plan plan;
     bool planReady;
@@ -421,6 +426,7 @@ extern "C" int picasso_wlan_stage1_run(void) {
 
     WlanModemPilConfig cfg;
     picasso_wlan_modem_pil_default_config(&cfg);
+    cfg.metadataBuffer = ctx->pilMetadata;   // heap-backed, requester-owned
     ctx->poll.deadline = nowMs(nullptr) + cfg.timeoutMs;
 
     const WlanModemPilIo io = {

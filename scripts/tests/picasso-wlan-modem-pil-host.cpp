@@ -107,6 +107,8 @@ int main(int argc, char **argv) {
                                 aop, pas, poll_peer, sleep_fn, now_fn};
     struct WlanModemPilConfig cfg;
     picasso_wlan_modem_pil_default_config(&cfg);
+    static uint8_t metadata_buffer[0x3000];   // host-side staging (heap analogue)
+    cfg.metadataBuffer = metadata_buffer;
     struct WlanModemPilState st;
     int rc = picasso_wlan_modem_pil_execute(&io, &cfg, &st);
 
