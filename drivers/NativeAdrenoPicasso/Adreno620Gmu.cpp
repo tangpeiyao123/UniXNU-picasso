@@ -476,6 +476,69 @@ bool readCmdDb(CmdDb &cmd)
         cmd.cxCount,
         cmd.cxCount > 0 ? cmd.cx[0] : 0, cmd.cxCount > 1 ? cmd.cx[1] : 0,
         cmd.cxCount > 2 ? cmd.cx[2] : 0, cmd.cxCount > 3 ? cmd.cx[3] : 0);
+    /* WLAN stage-1 rail survey (READ-ONLY diagnostic). The stage-1 PIL resolves MSS proxy rails from this
+     * same cmd-db; it currently fail-stops because it queries DTB supply labels (vdd_cx/vdd_mss) instead of
+     * the ARC resource ids (cx.lvl/mss.lvl). Print the real ids/level tables here using the already-mapped,
+     * already-validated db[] and the proven cmdDbAux reader -- no new parser, no vote, no hardware write.
+     * Arrays are zero-initialised and printed at fixed width so a trim point after a nonzero cannot hide a
+     * higher corner. This block cannot change any GPU vote or the return value below. */
+    printf("PICASSO_WLAN-CMDDB-DUMP-BEGIN\n");
+    {
+        uint16_t wlanMss[32] = {};
+        size_t wlanMssCount = 0;
+        uint32_t wlanMssAddr = 0;
+        const bool mssFound = cmdDbAux(db, dbBytes, "mss.lvl",
+            (const uint16_t (*)[8])header, wlanMss, 32, &wlanMssCount, &wlanMssAddr);
+        printf("PICASSO_WLAN-CMDDB mss.lvl found=%d addr=%x count=%u levels=%x,%x,%x,%x,%x,%x,%x,%x\n",
+            mssFound ? 1 : 0, wlanMssAddr, unsigned(wlanMssCount),
+            unsigned(wlanMss[0]), unsigned(wlanMss[1]), unsigned(wlanMss[2]), unsigned(wlanMss[3]),
+            unsigned(wlanMss[4]), unsigned(wlanMss[5]), unsigned(wlanMss[6]), unsigned(wlanMss[7]));
+        uint16_t wlanCx[32] = {};
+        size_t wlanCxCount = 0;
+        uint32_t wlanCxAddr = 0;
+        const bool cxFound = cmdDbAux(db, dbBytes, "cx.lvl",
+            (const uint16_t (*)[8])header, wlanCx, 32, &wlanCxCount, &wlanCxAddr);
+        printf("PICASSO_WLAN-CMDDB cx.lvl found=%d addr=%x count=%u levels=%x,%x,%x,%x,%x,%x,%x,%x\n",
+            cxFound ? 1 : 0, wlanCxAddr, unsigned(wlanCxCount),
+            unsigned(wlanCx[0]), unsigned(wlanCx[1]), unsigned(wlanCx[2]), unsigned(wlanCx[3]),
+            unsigned(wlanCx[4]), unsigned(wlanCx[5]), unsigned(wlanCx[6]), unsigned(wlanCx[7]));
+        if (!mssFound) {
+            /* True id spelling unknown: enumerate only ids containing "mss" (case-insensitive).
+             * Reuses the proven walk below; one line per slave, entries inline, hard-capped. */
+            for (unsigned resource = 0; resource < 8; ++resource) {
+                const uint16_t *h = header[resource];
+                if (!h[0]) break;
+                unsigned shown = 0;
+                printf("PICASSO_WLAN-CMDDB mss-scan slv=%u cnt=%u:", unsigned(h[0]), unsigned(h[3]));
+                for (size_t index = 0; index < h[3] && shown < 16; ++index) {
+                    const size_t at = h[1] + index * 24;
+                    if (at + 24 > dbBytes) break;
+                    char id[9] = {};
+                    bool isMss = false;
+                    for (unsigned byte = 0; byte < 8; ++byte) {
+                        const uint8_t c = db[at + byte];
+                        id[byte] = c >= 0x20 && c < 0x7F ? char(c) : '.';
+                    }
+                    for (unsigned byte = 0; byte + 2 < 8; ++byte) {
+                        const uint8_t a = db[at + byte] >= 'A' && db[at + byte] <= 'Z'
+                            ? uint8_t(db[at + byte] + 32) : db[at + byte];
+                        const uint8_t b = db[at + byte + 1] >= 'A' && db[at + byte + 1] <= 'Z'
+                            ? uint8_t(db[at + byte + 1] + 32) : db[at + byte + 1];
+                        const uint8_t c = db[at + byte + 2] >= 'A' && db[at + byte + 2] <= 'Z'
+                            ? uint8_t(db[at + byte + 2] + 32) : db[at + byte + 2];
+                        if (a == 'm' && b == 's' && c == 's') isMss = true;
+                    }
+                    if (!isMss) continue;
+                    const uint32_t addr = uint32_t(db[at + 16]) | (uint32_t(db[at + 17]) << 8) |
+                        (uint32_t(db[at + 18]) << 16) | (uint32_t(db[at + 19]) << 24);
+                    printf(" %s=%x", id, addr);
+                    ++shown;
+                }
+                printf("\n");
+            }
+        }
+    }
+    printf("PICASSO_WLAN-CMDDB-DUMP-END\n");
     /* If a required rail is missing, name every entry whose id starts with its first letter so the DB's own
      * identifier spelling is on the record. */
     if (!xoFound || !vrmFound) {
