@@ -31,7 +31,7 @@ struct Run {
     const struct WlanModemPilIo *io;
     const struct WlanModemPilConfig *cfg;
     struct WlanModemPilState *st;
-    uint8_t metadata[0x3000];
+    uint8_t *metadata;       // caller-owned buffer (cfg->metadataBuffer), never on stack
     size_t metadataBytes;
     uint8_t sha[32];
 };
@@ -62,9 +62,11 @@ static int peerAbsent(Run *r, const char *phase, unsigned step) {
 static int loadMetadata(Run *r) {
     int error;
     size_t out = 0;
-    // index 0 is modem.mdt (metadata). Capacity bounds the read.
-    if (r->cfg->metadataBytes > sizeof r->metadata) return fail(r, 32, "metadata-cap", -22);
-    error = r->io->read_part(r->io->context, 0, r->metadata, sizeof r->metadata, &out);
+    // index 0 is modem.mdt (metadata). Capacity bounds the read. The buffer is
+    // caller-owned (heap on device, static in the host harness); Run carries
+    // only the pointer so the 0x3000-byte array never consumes kernel stack.
+    if (!r->metadata || !r->cfg->metadataBytes) return fail(r, 32, "metadata-cap", -22);
+    error = r->io->read_part(r->io->context, 0, r->metadata, r->cfg->metadataBytes, &out);
     if (error) return fail(r, 32, "metadata-read", error);
     if (out != r->cfg->mdtBytes) return fail(r, 32, "metadata-size", -22);
     r->metadataBytes = out;
@@ -139,9 +141,14 @@ int picasso_wlan_modem_pil_execute(const struct WlanModemPilIo *io,
         !cfg->rails || cfg->rails > 8) {
         state->step = 0; state->phase = "owner-config"; state->error = -22; return -22;
     }
+    // Metadata staging must come from the caller (heap on device). Reject a
+    // missing buffer up front; loadMetadata enforces the size bound.
+    if (!cfg->metadataBuffer || !cfg->metadataBytes) {
+        state->step = 0; state->phase = "owner-buffer"; state->error = -22; return -22;
+    }
 
     Run r{};
-    r.io = io; r.cfg = cfg; r.st = state;
+    r.io = io; r.cfg = cfg; r.st = state; r.metadata = cfg->metadataBuffer;
     int error = 0;
     uint64_t deadline = 0;   // declared before any goto target.
 

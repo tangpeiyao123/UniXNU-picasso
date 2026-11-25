@@ -35,6 +35,12 @@ int picasso_pas4_supported_probe(uint32_t *outA1);      // Adreno620Cp.cpp (read
 
 namespace {
 
+// nowMs() is defined below (:144) but readFirmware() needs the same millisecond
+// clock for its deadline. mach_absolute_time() returns raw ticks, so comparing
+// it against a millisecond deadline is always true; never mix the two units.
+uint64_t nowMs(void *);
+constexpr uint64_t kFirmwareReadBudgetMs = 30000;
+
 // ---- compile-time part table ---------------------------------------------
 // index 0 = modem.mdt; index i>=1 = modem.bNN backing PH i-1. No snprintf on
 // the freestanding ARM path. The staged profile stores bare file names while
@@ -94,7 +100,7 @@ int readFirmware(void *context, uint64_t at, void *to, size_t length) {
     auto *c = static_cast<FirmwareCtx *>(context);
     auto *out = static_cast<uint8_t *>(to);
     while (length) {
-        if (mach_absolute_time() >= c->storeDeadline) return -1;
+        if (nowMs(nullptr) >= c->storeDeadline) return -1;
         uint32_t take = length > 65536 ? 65536 : static_cast<uint32_t>(length);
         if (native_ufs_modem_read(&c->window, at, out, take, c->bounce)) return -1;
         at += take; out += take; length -= take;
@@ -158,6 +164,11 @@ struct AdapterCtx {
     uint8_t digest[32];
     size_t digestBytes;
     uint8_t metadata[WLAN_MODEM_METADATA_BYTES];
+    // Metadata staging for the PIL state machine itself (cfg->metadataBuffer).
+    // Separate from `metadata` above, which cbReadPart uses to stage the FAT
+    // mdt before copying into the skeleton. This one lives in the IOMalloc'd
+    // AdapterCtx (heap), keeping the 0x3000-byte array off the kernel stack.
+    uint8_t pilMetadata[0x3000];
     uint32_t pieces[WLAN_MODEM_HEADERS];
     struct wlan_modem_load_plan plan;
     bool planReady;
@@ -179,6 +190,9 @@ int cbReadPart(void *context, unsigned index, uint8_t *dst, size_t cap, size_t *
 
     FirmwareCtx &fw = c->fw;
     if (!fw.fatMounted) {
+        // AdapterCtx is memset to zero on allocation; seed the read deadline
+        // here (ms clock, matching readFirmware) before any fat_mount read.
+        fw.storeDeadline = nowMs(nullptr) + kFirmwareReadBudgetMs;
         for (unsigned n = 0; n < 100 && !native_ufs_store_ready(); ++n) IOSleep(100);
         if (!native_ufs_store_ready()) return -11;
         int error = native_ufs_modem_open(&fw.window, fw.scratch,
@@ -421,6 +435,7 @@ extern "C" int picasso_wlan_stage1_run(void) {
 
     WlanModemPilConfig cfg;
     picasso_wlan_modem_pil_default_config(&cfg);
+    cfg.metadataBuffer = ctx->pilMetadata;   // heap-backed, requester-owned
     ctx->poll.deadline = nowMs(nullptr) + cfg.timeoutMs;
 
     const WlanModemPilIo io = {
