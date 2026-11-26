@@ -30,7 +30,8 @@ GPU_ARGS = ['sheng-gpu=4', 'sheng-gpu-metal=1', 'sheng-gpu-addon=1',
 # Physical touch remains enabled. Only synthetic swipe repetition, the redundant
 # touch-HID default and the boot-logo hold are omitted from this playback image.
 DROP_ARGS = ['offline-hid-swipe-delay=8', 'offline-hid-auto-home-count=8',
-             'offline-hid-swipe=8', 'sheng-touch-hid=1', 'picasso-boot-logo-hold=1']
+             'offline-hid-swipe=8', 'sheng-touch-hid=1', 'picasso-boot-logo-hold=1',
+             'offline-hid-auto-home=5']
 
 
 def digest(data):

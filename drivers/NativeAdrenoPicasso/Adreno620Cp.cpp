@@ -2385,14 +2385,20 @@ extern "C" int picasso_rpmh_adsp_resources(PicassoArcResource rails[3])
     return error;
 }
 
-// Stage-1 WLAN: MSS proxy rails vdd_cx / vdd_mss (DTB /soc/qcom,mss@4080000),
-// resolved from the same immutable cmd-db snapshot the ADSP owner reads.
+// Stage-1 WLAN: MSS proxy rails. The cmd-db resource ids are cx.lvl / mss.lvl
+// (the DTB /soc/qcom,mss@4080000 supplies are vdd_cx -> rpmh-regulator-cxlvl
+// "cx.lvl" on PM8150 S1, vdd_mss -> rpmh-regulator-msslvl "mss.lvl" on S8; the
+// supply labels are regulator names, not cmd-db ids, so they never resolve).
+// Device dump 2026-11-26 (read-only diagnostic image 462aeb4d):
+//   cx.lvl  addr=30000 levels 0,10,40,80,c0,100,180,1a0  (8 corners)
+//   mss.lvl addr=30060 levels 0,40,80,c0,100,140,180     (7 corners)
 // Deliberately NOT lcx.lvl / lmx.lvl / xo.lvl -- those are the ADSP/WCSS
-// 5-rail set, and a wrong-rail vote has an SError/kill-boot precedent here.
-// Minimum level is device-validated: DTB vdd 384000 uV => level 384 (mV scale
-// used by the a6xx cmd-db table). A failed lookup is returned to the adapter
-// as a fail-stop errno; no level is ever guessed.
-constexpr uint32_t kWlanModemRailMinimumMv = 384;
+// 5-rail set. 384 = 0x180 is a real corner in both tables (index 6), so the
+// minimum below is an enum level, not millivolts; the boot-floor pass then
+// re-selects the highest corner (cx -> 0x1a0/416, mss -> 0x180/384) and
+// overrides this first result. A failed lookup is returned to the adapter as a
+// fail-stop errno; no level is ever guessed.
+constexpr uint32_t kWlanModemRailMinimumLevel = 384;
 extern "C" int picasso_rpmh_modem_resources(PicassoArcResource rails[2])
 {
     if (!rails) return -22;
@@ -2408,10 +2414,10 @@ extern "C" int picasso_rpmh_modem_resources(PicassoArcResource rails[2])
         error = 0;
         for (unsigned i = 0; i < kRpmhCmdDbBytes; i += 4)
             if (picasso_db32(copy + i) != read32(db, i)) { error = -11; break; }
-        const char *names[2] = {"vdd_cx", "vdd_mss"};
+        const char *names[2] = {"cx.lvl", "mss.lvl"};
         for (unsigned i = 0; !error && i < 2; ++i) {
             error = picasso_arc_lookup(copy, kRpmhCmdDbBytes, names[i],
-                                       kWlanModemRailMinimumMv, &rails[i]);
+                                       kWlanModemRailMinimumLevel, &rails[i]);
             printf("PICASSO_WLAN rpmh resource=%s error=%d address=%x index=%u level=%u vote_sent=0\n",
                    names[i], error, rails[i].address, rails[i].index, rails[i].level);
         }
@@ -2420,7 +2426,7 @@ extern "C" int picasso_rpmh_modem_resources(PicassoArcResource rails[2])
         for (unsigned i = 0; !error && i < 2; ++i) {
             error = picasso_arc_lookup(copy, kRpmhCmdDbBytes, names[i],
                                        UINT32_MAX - 1, &rails[i]);
-            if (!error && rails[i].level < kWlanModemRailMinimumMv) error = -34;
+            if (!error && rails[i].level < kWlanModemRailMinimumLevel) error = -34;
         }
         if (!error && rails[0].address == rails[1].address) error = -22;
     }

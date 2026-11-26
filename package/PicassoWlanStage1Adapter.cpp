@@ -314,7 +314,7 @@ int cbSha256(void *context, const uint8_t *, size_t, uint8_t out[32]) {
 }
 
 // ---- rpmh / lease / aop / pas --------------------------------------------
-const char *const kRailNames[2] = {"vdd_cx", "vdd_mss"};
+const char *const kRailNames[2] = {"cx.lvl", "mss.lvl"};
 int cbRpmhWrite(void *context, unsigned rail, uint32_t, uint32_t) {
     auto *c = static_cast<AdapterCtx *>(context);
     if (!c || rail >= 2) return -22;

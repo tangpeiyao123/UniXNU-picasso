@@ -22,7 +22,7 @@ void picasso_wlan_modem_pil_default_config(struct WlanModemPilConfig *cfg) {
     cfg->readyBit = 2;              // PROVISIONAL: caller overrides; see design R4.
     cfg->handoverBit = 4;
     cfg->stopAckBit = 8;
-    cfg->rails = 2;                 // vdd_cx + vdd_mss, NOT the 5 WCSS rails.
+    cfg->rails = 2;                 // cx.lvl + mss.lvl, NOT the 5 WCSS rails.
 }
 
 namespace {
