@@ -2444,6 +2444,12 @@ extern "C" int picasso_rpmh_crypto_ready(void) { return rpmhVoteCryptoPath()==7 
 
 // PIL calls and the reserved metadata slot are shared with the GPU ZAP loader.
 static unsigned pasGate, pasPoisoned;
+// Read-only diagnostic snapshot: bit0 = gate held, bit1 = poisoned. Never
+// acquires or mutates the gate; safe to call from the WLAN stage1 logger.
+extern "C" unsigned picasso_pas_gate_snapshot(void) {
+    return (__atomic_load_n(&pasGate, __ATOMIC_ACQUIRE) ? 1u : 0u) |
+           (__atomic_load_n(&pasPoisoned, __ATOMIC_ACQUIRE) ? 2u : 0u);
+}
 extern "C" int picasso_pas_acquire(void) {
     for (unsigned n = 0; n < 30000; ++n) {
         if (__atomic_load_n(&pasPoisoned, __ATOMIC_ACQUIRE)) return -115;

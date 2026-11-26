@@ -31,6 +31,7 @@ extern "C" {
 int native_ufs_store_ready(void);                       // NativeUfs.cpp
 int picasso_aop_load_state_modem(bool on);              // PicassoAop.cpp:197
 int picasso_pas4_supported_probe(uint32_t *outA1);      // Adreno620Cp.cpp (read-only)
+unsigned picasso_pas_gate_snapshot(void);               // Adreno620Cp.cpp (read-only)
 }
 
 namespace {
@@ -328,14 +329,37 @@ int cbRpmhWrite(void *context, unsigned rail, uint32_t, uint32_t) {
     }
     const PicassoArcResource &r = c->rails[rail];
     int error = picasso_rpmh_active_write(r.address, r.index);
-    IOLog("PICASSO_WLAN stage1 rpmh rail=%u name=%s address=%x index=%u level=%u error=%d\n",
-          rail, kRailNames[rail], r.address, r.index, r.level, error);
+    IOLog("PICASSO_WLAN stage1 t=%llu rpmh rail=%u name=%s address=%x index=%u level=%u error=%d\n",
+          (unsigned long long)nowMs(nullptr), rail, kRailNames[rail], r.address, r.index, r.level, error);
     return error;
 }
 void cbSleep(void *, unsigned ms) { IOSleep(ms); }
-int cbLeaseAcquire(void *) { return picasso_pas_acquire(); }
-void cbLeaseRelease(void *, bool uncertain) { picasso_pas_release(uncertain); }
-int cbAop(void *, bool on) { return picasso_aop_load_state_modem(on); }
+// PAS trace: entry/exit timestamps around the two blocking boundaries. These
+// are the only calls that can stall stage1 for ~30s (pasGate 30000x IOSleep(1)
+// and the AOP QMP load_state wait). Logging only -- no control-flow change.
+int cbLeaseAcquire(void *) {
+    uint64_t t0 = nowMs(nullptr);
+    unsigned g0 = picasso_pas_gate_snapshot();
+    int error = picasso_pas_acquire();
+    IOLog("PICASSO_WLAN stage1 t=%llu lease acquire error=%d gate_in=%u gate_out=%u\n",
+          (unsigned long long)t0, error, g0, picasso_pas_gate_snapshot());
+    return error;
+}
+void cbLeaseRelease(void *, bool uncertain) {
+    unsigned g0 = picasso_pas_gate_snapshot();
+    picasso_pas_release(uncertain);
+    IOLog("PICASSO_WLAN stage1 t=%llu lease release uncertain=%u gate_in=%u gate_out=%u\n",
+          (unsigned long long)nowMs(nullptr), uncertain, g0, picasso_pas_gate_snapshot());
+}
+int cbAop(void *, bool on) {
+    uint64_t t0 = nowMs(nullptr);
+    IOLog("PICASSO_WLAN stage1 t=%llu aop enter on=%u gate=%u\n",
+          (unsigned long long)t0, on, picasso_pas_gate_snapshot());
+    int error = picasso_aop_load_state_modem(on);
+    IOLog("PICASSO_WLAN stage1 t=%llu aop exit on=%u error=%d gate=%u\n",
+          (unsigned long long)nowMs(nullptr), on, error, picasso_pas_gate_snapshot());
+    return error;
+}
 
 // New modem validator: the ADSP one rejects the modem carveout (its cmd2 only
 // accepts 0x89200000). cmd1 metadata address is U1 (device-validated).
@@ -350,9 +374,11 @@ int cbPas(void *, unsigned command, uint64_t address, uint64_t bytes, uint32_t p
     PicassoPasIo io = {nullptr, picasso_pas_device_call, picasso_pas_device_delay};
     PicassoPasReply reply = {};
     int error = picasso_pas_execute_ex(&io, command, address, bytes, pasId, modemValidate, &reply);
-    IOLog("PICASSO_WLAN stage1 pas cmd=%u address=%llx bytes=%llx pas=%u error=%d a0=%x a1=%x session=%llx\n",
-          command, static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
-          pasId, error, reply.a0, reply.a1, static_cast<unsigned long long>(reply.a6));
+    IOLog("PICASSO_WLAN stage1 t=%llu pas cmd=%u address=%llx bytes=%llx pas=%u error=%d a0=%x a1=%x session=%llx gate=%u\n",
+          (unsigned long long)nowMs(nullptr), command,
+          static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes),
+          pasId, error, reply.a0, reply.a1, static_cast<unsigned long long>(reply.a6),
+          picasso_pas_gate_snapshot());
     return error;
 }
 
@@ -444,10 +470,15 @@ extern "C" int picasso_wlan_stage1_run(void) {
         cbPollPeer, cbSleep, nowMs,
     };
     WlanModemPilState state = {};
+    IOLog("PICASSO_WLAN stage1 t=%llu diag=PAS-TRACE-v1 execute-enter rails=%u\n",
+          (unsigned long long)nowMs(nullptr), cfg.rails);
     int error = picasso_wlan_modem_pil_execute(&io, &cfg, &state);
+    IOLog("PICASSO_WLAN stage1 t=%llu diag=execute-exit rc=%d phase=%s\n",
+          (unsigned long long)nowMs(nullptr), error, state.phase ? state.phase : "(null)");
 
-    IOLog("PICASSO_WLAN stage1 adapter phase=%s step=%u error=%d rc=%d pasCalls=%u railVotes=%u "
+    IOLog("PICASSO_WLAN stage1 t=%llu adapter phase=%s step=%u error=%d rc=%d pasCalls=%u railVotes=%u "
           "partsLoaded=%u peerPolls=%u authenticated=%u ready=%u leased=%u released=%u quarantined=%u\n",
+          (unsigned long long)nowMs(nullptr),
           state.phase ? state.phase : "(null)", state.step, state.error, error,
           state.pasCalls, state.railVotes, state.partsLoaded, state.peerPolls,
           state.authenticated, state.ready, state.leased, state.released, state.quarantined);
