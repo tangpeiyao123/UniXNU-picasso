@@ -315,8 +315,6 @@ kernel_args = [
   "offline-hid-swipe-delay=8",
   "offline-hid-auto-home-count=8",
   "offline-hid-swipe=8",
-  # Start the opt-in stage-1 PIL/WLAN adapter on its own kernel thread.
-  "sheng-wlan-stage1=1",
 ]
 # Keep framebuffer panic rendering off while USB CDC captures diagnostics.
 panic_screen = false
