@@ -255,6 +255,16 @@ int cbReadPart(void *context, unsigned index, uint8_t *dst, size_t cap, size_t *
         return 0;
     }
 
+    // index 1/2 are disk b00/b01 = ELF PH0/PH1, which wlan_modem_load_plan()
+    // deliberately skips (PH0 = ELF header, PH1 = hash table; their bytes are
+    // already inside modem.mdt = PH0+PH1, staged to the PAS metadata slot above
+    // and covered by the pinned mdt digest). plan.segments[].index therefore
+    // starts at PH2, so there is no carveout segment with index-1 == 0/1.
+    // Without this guard, loadSegments() i=1 hits "!seg -> -22" on its FIRST
+    // part and zero segments get staged (fail-stop, observed on device).
+    // Treat them as intentionally absent, same as filesz==0 parts (b18/b25).
+    if (index >= 1 && index <= 2) return -2;
+
     // index>=1: disk b(index-1) backs PH index-1. The skeleton's chunk is only
     // 4096 bytes, so the full file is read here for both the pin digest and
     // the carveout copy; only min(cap, filesz) bytes go back to the skeleton.
