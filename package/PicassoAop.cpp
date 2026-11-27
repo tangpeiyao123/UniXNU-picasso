@@ -38,11 +38,16 @@ uint64_t deadline() {
     uint64_t value; clock_interval_to_deadline(5, kSecondScale, &value); return value;
 }
 int wait(PicassoQmp *q) {
-    for (;;) {
+    // Bounded even if the platform clock/deadline is not advancing as the
+    // host model assumes (worst case 20000 * 1ms). A stalled peer must never
+    // wedge the stage1 firmware thread forever.
+    for (unsigned spins = 0; spins < 20000; ++spins) {
         int state = picasso_qmp_step(q, mach_absolute_time());
         if (state <= QmpClosed || state == QmpOpen) return state;
         IOSleep(1);
     }
+    q->state = QmpTimeout;
+    return QmpTimeout;
 }
 }
 
@@ -138,6 +143,9 @@ int load_state_indexed(unsigned idx, bool on) {
     const char *name = aopImageNames[idx];
     ImageLoad &img = load.image[idx];
     int result = 0;
+    IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=gate owned=%u uncertain=%u attempted=%u\n",
+          idx, on, static_cast<unsigned>(load.q.owned), static_cast<unsigned>(load.uncertain),
+          static_cast<unsigned>(img.attempted));
     if (load.uncertain) { result = -115; goto out; }
     if (on) {
         // A repeated on for the same image is a caller error (matches the
@@ -154,8 +162,14 @@ int load_state_indexed(unsigned idx, bool on) {
                               load.ipcc?uintptr_t(load.ipcc->getVirtualAddress()):0};
                 if(!load.context.ram || !load.context.ipcc){releaseLoad();result=-12;goto out;}
                 QmpIo io={&load.context,aopRead,aopWrite,aopBarrier,aopKick};
+                IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=map-ok ram=%llx ipcc=%llx\n",
+                      idx, on, (unsigned long long)load.context.ram, (unsigned long long)load.context.ipcc);
                 int state=picasso_qmp_begin(&load.q,&io,0x1000,deadline());
+                IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=begin state=%d owned=%u\n",
+                      idx, on, state, static_cast<unsigned>(load.q.owned));
                 if(state>=0)state=wait(&load.q);
+                IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=handshake-wait state=%d owned=%u\n",
+                      idx, on, state, static_cast<unsigned>(load.q.owned));
                 if(state!=QmpOpen){
                     int closed=picasso_qmp_close(&load.q,deadline());
                     if(closed==QmpClosing)closed=wait(&load.q);
@@ -171,8 +185,12 @@ int load_state_indexed(unsigned idx, bool on) {
         // Static literal is zero-padded by the compiler, so no stack garbage
         // reaches the mailbox; no snprintf in the freestanding ARM build.
         const char *message = aopLoadMessages[idx][on ? 0 : 1];
+        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=pre-send owned=%u state=%d\n",
+              idx, on, static_cast<unsigned>(load.q.owned), load.q.state);
         int state = picasso_qmp_send(&load.q, message, deadline());
+        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=send state=%d\n", idx, on, state);
         if (state == QmpSending) state = wait(&load.q);
+        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=send-wait state=%d\n", idx, on, state);
         if (state != QmpOpen) load.uncertain = true;
         else img.on = on;
         // Preserve the historical ADSP log prefix; modem uses its own prefix
