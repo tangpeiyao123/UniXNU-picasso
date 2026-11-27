@@ -114,19 +114,19 @@ int main(int argc,char **argv) {
     }
     // PA-1: two images share one QMP session. adsp is held on across the
     // whole boot (PicassoAdspBoot's for(;;)); modem borrows the same session
-    // with name "mss" and must NOT get -16 from a per-image attempted guard.
+    // with name "modem" and must NOT get -16 from a per-image attempted guard.
     if(!strcmp(mode,"dual")) {
         messages=true;
         expectName="adsp"; expectVal="on";
         assert(!picasso_aop_load_state(true));           // adsp on, consumed=1
         assert(consumed==1 && load.image[0].on && !load.image[1].on);
         assert(picasso_aop_load_state(true)==-16);        // same image still -16
-        expectName="mss"; expectVal="on";
+        expectName="modem"; expectVal="on";
         assert(!picasso_aop_load_state_modem(true));      // modem on, consumed=2, NOT -16
         assert(consumed==2 && load.image[0].on && load.image[1].on);
         assert(picasso_aop_load_state_modem(true)==-16);  // modem repeat -16
         assert(picasso_aop_finish()==-115);               // cannot close with images on
-        expectName="mss"; expectVal="off";
+        expectName="modem"; expectVal="off";
         assert(!picasso_aop_load_state_modem(false));     // modem off, consumed=3
         assert(consumed==3 && load.image[0].on && !load.image[1].on);
         assert(picasso_aop_finish()==-115);               // adsp still on
@@ -136,7 +136,7 @@ int main(int argc,char **argv) {
         assert(!picasso_aop_finish());                    // all off -> close ok
         assert(unmaps==2 && !load.ram);
         for(unsigned n=0;n<1024;++n)if(n!=3)assert(ipcc[n]==0x5aa55aa5);
-        puts("PASS PA-1 dual image: adsp+modem share one QMP session, per-image state, name=mss, single close");
+        puts("PASS PA-1 dual image: adsp+modem share one QMP session, per-image state, name=modem, single close");
         return 0;
     }
     if(!strcmp(mode,"alloc-ram"))failAlloc=1;

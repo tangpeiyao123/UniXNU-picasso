@@ -120,15 +120,15 @@ namespace {
 // second QMP session: this implementation is single-channel and the ADSP
 // session is held open for boot.
 enum { AopImageAdsp = 0, AopImageModem = 1, AopImageCount = 2 };
-static const char *const aopImageNames[AopImageCount] = {"adsp", "mss"};
+static const char *const aopImageNames[AopImageCount] = {"adsp", "modem"};
 // Static message literals: zero-padded at compile time (no stack garbage in
 // the QMP descriptor) and no snprintf dependency in the -ffreestanding ARM
 // build. Index [image][on?0:1].
 static const char *const aopLoadMessages[AopImageCount][2] = {
     {"{class: image, res: load_state, name: adsp, val: on}",
      "{class: image, res: load_state, name: adsp, val: off}"},
-    {"{class: image, res: load_state, name: mss, val: on}",
-     "{class: image, res: load_state, name: mss, val: off}"},
+    {"{class: image, res: load_state, name: modem, val: on}",
+     "{class: image, res: load_state, name: modem, val: off}"},
 };
 struct ImageLoad { bool attempted, on; };
 struct LoadState {
@@ -168,8 +168,9 @@ void releaseLoad() {
 namespace {
 // Internal per-image load_state transaction on the SHARED session. Holds the
 // independent aopGate across the whole transaction. `on` for adsp keeps the
-// exact prior QMP sequence; the modem entry uses name "mss" (validated on
-// device, NOT a proven constant).
+// exact prior QMP sequence; the modem entry uses name "modem", the upstream
+// Q6V5 AOSS load_state resource name (commit c1fe10d2; mss was only a DTB
+// partition/firmware name, never a QMP load_state name).
 int load_state_indexed(unsigned idx, bool on) {
     if (idx >= AopImageCount) return -22;
     int error = aopGateAcquire();

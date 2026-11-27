@@ -18,8 +18,8 @@ extern "C" int picasso_adsp_image_load(PicassoAdspImage *, volatile uint8_t *, s
 extern "C" void picasso_adsp_image_close(PicassoAdspImage *);
 extern "C" void picasso_adsp_boot(const PicassoAdspEvents *);
 extern "C" int picasso_aop_load_state(bool on);
-// Modem (mss) image on the shared AOP QMP session. `name: mss` is a
-// device-validated assumption (no in-tree precedent); failure is fatal-by-design.
+// Modem image on the shared AOP QMP session. `name: modem` is the upstream
+// Q6V5 AOSS load_state resource name (commit c1fe10d2); failure is fatal-by-design.
 extern "C" int picasso_aop_load_state_modem(bool on);
 extern "C" int picasso_aop_finish(void);
 #endif
