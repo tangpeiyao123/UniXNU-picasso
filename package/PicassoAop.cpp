@@ -49,6 +49,40 @@ int wait(PicassoQmp *q) {
     q->state = QmpTimeout;
     return QmpTimeout;
 }
+// DIAGNOSTIC-ONLY wait used by load_state's post-send path. Same control flow
+// as wait() (identical step/return/sleep sequence); the only additions are
+// IOLog snapshots. Kept separate so the probe path keeps its exact log count
+// (host test asserts lines==1/2 for probe). txlen==0 means the peer consumed
+// the message; rxlen!=0 means the peer wrote a reply (e.g. rejecting mss).
+int waitDiag(PicassoQmp *q, const char *tag) {
+    uint64_t entered = mach_absolute_time();
+    IOLog("PICASSO_WLAN aopdiag %s wait-enter state=%d txlen=%u rxlen=%u now=%llu deadline=%llu\n",
+          tag, q->state, q->io.read(q->io.context, q->tx),
+          q->io.read(q->io.context, q->rx),
+          (unsigned long long)entered, (unsigned long long)q->deadline);
+    for (unsigned spins = 0; spins < 20000; ++spins) {
+        int state = picasso_qmp_step(q, mach_absolute_time());
+        if (spins % 500 == 0)
+            IOLog("PICASSO_WLAN aopdiag %s wait-tick spins=%u state=%d txlen=%u rxlen=%u now=%llu deadline=%llu\n",
+                  tag, spins, state, q->io.read(q->io.context, q->tx),
+                  q->io.read(q->io.context, q->rx),
+                  (unsigned long long)mach_absolute_time(), (unsigned long long)q->deadline);
+        if (state <= QmpClosed || state == QmpOpen) {
+            IOLog("PICASSO_WLAN aopdiag %s wait-exit spins=%u state=%d txlen=%u rxlen=%u now=%llu deadline=%llu\n",
+                  tag, spins, state, q->io.read(q->io.context, q->tx),
+                  q->io.read(q->io.context, q->rx),
+                  (unsigned long long)mach_absolute_time(), (unsigned long long)q->deadline);
+            return state;
+        }
+        IOSleep(1);
+    }
+    q->state = QmpTimeout;
+    IOLog("PICASSO_WLAN aopdiag %s wait-timeout state=%d txlen=%u rxlen=%u now=%llu deadline=%llu\n",
+          tag, q->state, q->io.read(q->io.context, q->tx),
+          q->io.read(q->io.context, q->rx),
+          (unsigned long long)mach_absolute_time(), (unsigned long long)q->deadline);
+    return QmpTimeout;
+}
 }
 
 extern "C" int picasso_aop_probe(void) {
@@ -188,9 +222,15 @@ int load_state_indexed(unsigned idx, bool on) {
         IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=pre-send owned=%u state=%d\n",
               idx, on, static_cast<unsigned>(load.q.owned), load.q.state);
         int state = picasso_qmp_send(&load.q, message, deadline());
-        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=send state=%d\n", idx, on, state);
-        if (state == QmpSending) state = wait(&load.q);
-        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=send-wait state=%d\n", idx, on, state);
+        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=send state=%d txlen=%u rxlen=%u now=%llu deadline=%llu\n",
+              idx, on, state, load.q.io.read(load.q.io.context, load.q.tx),
+              load.q.io.read(load.q.io.context, load.q.rx),
+              (unsigned long long)mach_absolute_time(), (unsigned long long)load.q.deadline);
+        if (state == QmpSending) state = waitDiag(&load.q, "modem-send");
+        IOLog("PICASSO_WLAN aopdiag idx=%u on=%u stage=send-wait state=%d txlen=%u rxlen=%u now=%llu deadline=%llu\n",
+              idx, on, state, load.q.io.read(load.q.io.context, load.q.tx),
+              load.q.io.read(load.q.io.context, load.q.rx),
+              (unsigned long long)mach_absolute_time(), (unsigned long long)load.q.deadline);
         if (state != QmpOpen) load.uncertain = true;
         else img.on = on;
         // Preserve the historical ADSP log prefix; modem uses its own prefix
