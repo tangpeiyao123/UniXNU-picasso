@@ -450,6 +450,82 @@ int cbPollPeer(void *context, struct WlanModemPeerEvent *event) {
     }
 }
 
+// ---- READ-ONLY peer-timeout survey (diagnostic only, zero control flow) ----
+// Invoked once after execute() returns -60 (peer timeout). Everything below is
+// observation: no PAS/RPMH/AOP/SMEM writes, no state mutation, no retry. It
+// distinguishes two root causes that the -2-only poll stream cannot:
+//   (a) MPSS never ran -> both private (0,1) and global (0xfffe) SMP2P partitions
+//       contain no item 435/428, and the carveout entry point is still untouched;
+//   (b) reader looked in the wrong place -> items exist but cbPollPeer's private-
+//       only partition search never reached them.
+static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
+    if (!ac || !ac->poll.smemMapped) {
+        IOLog("PICASSO_WLAN diag-survey result=%d now=%llu smemMapped=0 (no survey)\n",
+              result, (unsigned long long)now);
+        return;
+    }
+    struct wlan_smem_io io = {&ac->poll.smem, smemRead};
+
+    // SMEM header sanity + raw TOC header (read-only). Keep SMEM version in its
+    // own variable: the TOC read below overwrites hdr[].
+    uint8_t hdr[32] = {0};
+    smemRead(&ac->poll.smem, 0x5c, hdr, 4);
+    uint32_t smemVer = (wlan_sm32(hdr) >> 16) & 0xffff;
+    const uint32_t toc = WLAN_SMEM_SIZE - 4096;
+    smemRead(&ac->poll.smem, toc, hdr, 32);
+    // TOC header per WlanSmem.h:24-28 -> magic@+0 (0x434f5424), ver@+4 (1), count@+8.
+    IOLog("PICASSO_WLAN diag-survey result=%d now=%llu smem-ver=%u toc-magic=%08x toc-ver=%u toc-count=%u\n",
+          result, (unsigned long long)now, smemVer,
+          (unsigned)wlan_sm32(hdr + 0), (unsigned)wlan_sm32(hdr + 4),
+          (unsigned)wlan_sm32(hdr + 8));
+
+    // Probe BOTH partitions explicitly. cbPollPeer only falls back to global
+    // when private returns -2; this survey reports each independently so a
+    // global-only item placement (hypothesis b) becomes visible.
+    const uint16_t pairs[2][2] = {{0, 1}, {0xfffe, 0xfffe}};
+    for (unsigned pi = 0; pi < 2; ++pi) {
+        struct wlan_smem_partition p = {};
+        int perr = wlan_smem_partition(&io, pairs[pi][0], pairs[pi][1], &p);
+        IOLog("PICASSO_WLAN diag-survey partition[%u] host=%u remote=%u err=%d "
+              "off=%x size=%x uncached=%x cached=%x line=%x\n",
+              pi, pairs[pi][0], pairs[pi][1], perr,
+              p.offset, p.size, p.uncached, p.cached, p.cacheline);
+        if (perr != 0) continue;
+        const uint16_t ids[2] = {WLAN_SMEM_IN, WLAN_SMEM_OUT};
+        for (unsigned k = 0; k < 2; ++k) {
+            struct wlan_smem_item item = {};
+            int ferr = wlan_smem_find(&io, &p, ids[k], &item);
+            IOLog("PICASSO_WLAN diag-survey partition[%u] item=%u find=%d "
+                  "item-off=%x item-size=%x\n",
+                  pi, ids[k], ferr, item.offset, item.size);
+        }
+    }
+
+    // Execution-point evidence: read the first 32 bytes at e_entry from the
+    // still-mapped carveout. If MPSS never executed, this is the raw ELF payload;
+    // if it ran, cached instruction fetches leave the region unchanged on this
+    // uncached mapping, so we print it purely as a fingerprint, not a verdict.
+    if (ac->carveout.mapped && ac->planReady) {
+        uint32_t entry = ac->plan.entry;
+        if (entry >= WLAN_MODEM_BASE && (entry - WLAN_MODEM_BASE) + 32 <= WLAN_MODEM_BYTES) {
+            const volatile uint8_t *p = ac->carveout.va + (entry - WLAN_MODEM_BASE);
+            IOLog("PICASSO_WLAN diag-survey entry=%x bytes=%02x%02x%02x%02x %02x%02x%02x%02x "
+                  "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                  entry, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+                  p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+        } else {
+            IOLog("PICASSO_WLAN diag-survey entry=%x outside carveout (no dump)\n", entry);
+        }
+    } else {
+        IOLog("PICASSO_WLAN diag-survey carveout.mapped=%d planReady=%d (no entry dump)\n",
+              ac->carveout.mapped ? 1 : 0, ac->planReady ? 1 : 0);
+    }
+
+    // Gate state at timeout: poison/share snapshot is the upstream cause of the
+    // ADSP/GPU -115/-40 seen downstream, printed here to close the causal loop.
+    IOLog("PICASSO_WLAN diag-survey pasGate=%x (read-only)\n", picasso_pas_gate_snapshot());
+}
+
 }  // namespace
 
 extern "C" int picasso_wlan_stage1_probe_pas4(void) {
@@ -492,6 +568,13 @@ extern "C" int picasso_wlan_stage1_run(void) {
           state.phase ? state.phase : "(null)", state.step, state.error, error,
           state.pasCalls, state.railVotes, state.partsLoaded, state.peerPolls,
           state.authenticated, state.ready, state.leased, state.released, state.quarantined);
+
+    // READ-ONLY diagnostic survey on the peer-timeout path only. No control-flow
+    // change: this runs after execute() has already returned -60 and stop() has
+    // completed; it neither retries nor alters the result. It dumps the two
+    // SMP2P partitions and e_entry bytes to settle root cause (a) vs (b).
+    if (error == -60) diagSurveyPeer(ctx, nowMs(nullptr), error);
+
     unmapPhys(ctx->carveout);
     unmapPhys(ctx->metadataSlot);
     IOFree(ctx, sizeof(AdapterCtx));
