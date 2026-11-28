@@ -53,9 +53,12 @@ static void partition(uint32_t descCtrl[4], uint32_t &descOff, uint32_t &txOff, 
     g_nwrites=0;g_nkicks=0;g_barriers=0;
 }
 
+static unsigned g_sleeps=0;
+static void noSleep(void*,uint32_t){++g_sleeps;} // host: no real 5s wait
 static picasso_mpss_glink_diag_io makeIo(){
     picasso_mpss_glink_diag_io io={};
-    io.smem.read=rd;io.smem_write32=wr32;io.barrier=bar;io.ipcc_kick=kick;io.context=nullptr;
+    io.smem.read=rd;io.smem_write32=wr32;io.barrier=bar;io.ipcc_kick=kick;
+    io.sleep_ms=noSleep;io.context=nullptr;
     return io;
 }
 
@@ -88,6 +91,62 @@ static void casePeerResponded(){
     picasso_mpss_glink_diag_result out={};
     CHECK(picasso_mpss_glink_diag_write_version(&io,&out)==0);
     CHECK(out.peerResponded && out.afterRxHead==4);
+}
+
+// REGRESSION for P1d's structural false negative: peer responds LATER (on the
+// 5th 10ms tick), as real hardware does (~6.5ms doorbell). The old one-shot
+// readback would miss it; the polling loop must catch it and see the ACK word.
+static uint32_t g_respDesc=0,g_respRx=0; static unsigned g_ticks=0, g_respAt=5;
+static void lateSleep(void*,uint32_t){
+    ++g_ticks;
+    if(g_ticks==g_respAt){
+        put32(g_respDesc+12,4);              // peer advances RX head
+        put32(g_respRx,0x00010001);          // GLINK_VERSION_ACK cmd=1/ver=1
+        put32(g_respRx+4,0);
+    }
+}
+static void caseDelayedResponse(){
+    uint32_t c[4]={0,0,0,0},d,t,r;partition(c,d,t,r);
+    g_respDesc=d;g_respRx=r;g_ticks=0;g_respAt=5;
+    auto io=makeIo();io.sleep_ms=lateSleep;
+    picasso_mpss_glink_diag_result out={};
+    CHECK(picasso_mpss_glink_diag_write_version(&io,&out)==0);
+    CHECK(out.peerResponded && out.afterRxHead==4);
+    CHECK(out.ackSeen && out.rx611Cmd0==0x00010001u);
+    CHECK(out.sampCount==g_respAt+1);          // caught on sample after the 5th sleep
+    CHECK(out.kickValue==0x00020000u);       // write set unchanged
+    g_ticks=0;
+}
+
+// Doorbell at tick5 but ACK payload at tick8 (different ticks). Sticky OR
+// must keep sampling after peerResponded and still catch the ACK (fresh-eyes
+// review edge case); without sticky OR this would read an empty rx611.
+static unsigned g_ackTick=8;
+static void splitSleep(void*,uint32_t){
+    ++g_ticks;
+    if(g_ticks==5) put32(g_respDesc+12,4);
+    if(g_ticks==g_ackTick){ put32(g_respRx,0x00010001); put32(g_respRx+4,0); }
+}
+static void caseSplitAck(){
+    uint32_t c[4]={0,0,0,0},d,t,r;partition(c,d,t,r);
+    g_respDesc=d;g_respRx=r;g_ticks=0;g_ackTick=8;
+    auto io=makeIo();io.sleep_ms=splitSleep;
+    picasso_mpss_glink_diag_result out={};
+    CHECK(picasso_mpss_glink_diag_write_version(&io,&out)==0);
+    CHECK(out.peerResponded && out.ackSeen);
+    CHECK(out.rx611Cmd0==0x00010001u);
+    CHECK(out.sampCount==9); // sample after the 8th sleep
+    g_ticks=0;
+}
+
+// No-response case: full 5000ms window elapses (500 samples), no ACK.
+static void caseNoResponseFullWindow(){
+    uint32_t c[4]={0,0,0,0},d,t,r;partition(c,d,t,r);
+    auto io=makeIo();picasso_mpss_glink_diag_result out={};
+    CHECK(picasso_mpss_glink_diag_write_version(&io,&out)==0);
+    CHECK(!out.peerResponded && !out.ackSeen);
+    CHECK(out.sampCount==501);               // 0..5000 step 10 inclusive
+    CHECK(out.windowMs==5000);
 }
 
 static void caseNonZeroAbort(){
@@ -136,6 +195,9 @@ int main(int argc,char**argv){
     const char*m=argc>1?argv[1]:"all";
     if(!std::strcmp(m,"all")||!std::strcmp(m,"zero"))caseAllZero();
     if(!std::strcmp(m,"all")||!std::strcmp(m,"peer"))casePeerResponded();
+    if(!std::strcmp(m,"all")||!std::strcmp(m,"delayed"))caseDelayedResponse();
+    if(!std::strcmp(m,"all")||!std::strcmp(m,"splitack"))caseSplitAck();
+    if(!std::strcmp(m,"all")||!std::strcmp(m,"nowin"))caseNoResponseFullWindow();
     if(!std::strcmp(m,"all")||!std::strcmp(m,"nonzero"))caseNonZeroAbort();
     if(!std::strcmp(m,"all")||!std::strcmp(m,"rxnonzero"))caseRxNonZeroAbort();
     if(!std::strcmp(m,"all")||!std::strcmp(m,"unstable"))caseUnstable();

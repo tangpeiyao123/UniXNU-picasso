@@ -45,10 +45,15 @@ struct picasso_mpss_glink_diag_result {
     uint32_t descSize, txSize, rxSize;
     uint32_t txHeadWritten;    // value written to desc+4 (expected 8)
     uint32_t afterHead;        // desc+4 readback
-    uint32_t afterRxHead;      // desc+12 readback (peer-written; liveness signal)
+    uint32_t afterRxHead;      // desc+12 last sample (peer-written; liveness signal)
     uint32_t kickValue;        // value written to IPCC
+    uint32_t sampCount;        // number of desc+12 samples taken in the window
+    uint32_t windowMs;         // configured sample window (5000)
+    uint32_t rx611Cmd0;        // first u32 of rx FIFO at detection/end (cmd in low 16)
+    uint32_t rx611Cmd1;        // second u32 of rx FIFO (version/features)
     bool wrote;                // true only after all preconditions passed
-    bool peerResponded;        // afterRxHead changed from before[3] -> peer alive
+    bool peerResponded;        // desc+12 changed from before[3] inside the window
+    bool ackSeen;              // rx611 cmd0 low16 == 1 (GLINK_VERSION_ACK)
 };
 
 // The IO bundle splits SMEM (read/write32/barrier) from the IPCC kick MMIO so
@@ -58,6 +63,7 @@ struct picasso_mpss_glink_diag_io {
     int (*smem_write32)(void *, uint32_t, uint32_t);// SMEM 32-bit write
     void (*barrier)(void *);                        // memory barrier
     int (*ipcc_kick)(void *, uint32_t);             // IPCC write (value asserted)
+    void (*sleep_ms)(void *, uint32_t);             // sleep between samples (host: no-op)
     void *context;
 };
 
@@ -67,7 +73,7 @@ static inline int picasso_mpss_glink_diag_write_version(
         const struct picasso_mpss_glink_diag_io *io,
         struct picasso_mpss_glink_diag_result *out) {
     if (!io || !io->smem.read || !io->smem_write32 || !io->barrier ||
-        !io->ipcc_kick || !out) return -22;
+        !io->ipcc_kick || !io->sleep_ms || !out) return -22;
     *out = picasso_mpss_glink_diag_result{};
     out->error = -22;
 
@@ -111,14 +117,52 @@ static inline int picasso_mpss_glink_diag_write_version(
     out->kickValue = PicassoMpssIpccKick;
     if (io->ipcc_kick(ctx, PicassoMpssIpccKick)) { out->error = -5; return -5; }
 
-    // Readback only; no further writes.
-    uint8_t head[4], rxh[4];
-    if (wlan_smread(&io->smem, desc.offset + 4, head, 4) ||
-        wlan_smread(&io->smem, desc.offset + 12, rxh, 4)) { out->error = -5; return -5; }
+    // Readback only; no further writes. P1d sampled desc+12 ONCE immediately
+    // after kick (0ms window) -- a structural false negative: peer responds
+    // asynchronously (doorbell ~6.5ms, full transport ready ~10s, §9.30).
+    // Now sample desc+12 every 10ms for a 5000ms window (min of the 5000ms
+    // reference in hakios.wifi.c:3259 and the 10s full ready). On change, read
+    // rx611 first word to check for GLINK_VERSION_ACK (cmd=1).
+    uint8_t head[4];
+    if (wlan_smread(&io->smem, desc.offset + 4, head, 4)) { out->error = -5; return -5; }
     out->afterHead = wlan_sm32(head);
-    out->afterRxHead = wlan_sm32(rxh);
     if (out->afterHead != 8) { out->error = -11; return -11; } // our write didn't stick
-    out->peerResponded = (out->afterRxHead != out->before[3]); // desc+12 peer-written
+
+    const uint32_t pollStepMs = 10, pollWindowMs = 5000;
+    out->windowMs = pollWindowMs;
+    for (uint32_t elapsed = 0; elapsed <= pollWindowMs; elapsed += pollStepMs) {
+        // desc+12 (peer-written RX head): liveness signal.
+        uint8_t rxh[4];
+        if (wlan_smread(&io->smem, desc.offset + 12, rxh, 4)) { out->error = -5; return -5; }
+        ++out->sampCount;
+        out->afterRxHead = wlan_sm32(rxh);
+        if (out->afterRxHead != out->before[3]) out->peerResponded = true;
+
+        // rx611 first word: GLINK_VERSION_ACK (cmd=1 in low 16). Sticky OR:
+        // doorbell and ACK payload may land on different ticks (fresh-eyes
+        // review note). Keep sampling until both signals seen or window ends;
+        // never overwrite a previously seen ACK with a later empty read.
+        uint8_t word[4];
+        if (wlan_smread(&io->smem, rx.offset, word, 4)) { out->error = -5; return -5; }
+        uint32_t cmd0 = wlan_sm32(word);
+        if (!out->ackSeen && (cmd0 & 0xffffu) == 1u) {
+            out->ackSeen = true;
+            out->rx611Cmd0 = cmd0;
+            if (wlan_smread(&io->smem, rx.offset + 4, word, 4)) { out->error = -5; return -5; }
+            out->rx611Cmd1 = wlan_sm32(word);
+        }
+        if (out->peerResponded && out->ackSeen) break;
+        if (elapsed < pollWindowMs) io->sleep_ms(ctx, pollStepMs);
+    }
+    // If the window ended without an ACK, preserve the final rx611 words for
+    // diagnostics (empty = peer never wrote; nonzero non-ACK = other command).
+    if (!out->ackSeen) {
+        uint8_t word[4];
+        if (wlan_smread(&io->smem, rx.offset, word, 4)) { out->error = -5; return -5; }
+        out->rx611Cmd0 = wlan_sm32(word);
+        if (wlan_smread(&io->smem, rx.offset + 4, word, 4)) { out->error = -5; return -5; }
+        out->rx611Cmd1 = wlan_sm32(word);
+    }
     out->error = 0;
     return 0;
 }

@@ -162,6 +162,9 @@ int diagSmemWrite32(void *context, uint32_t at, uint32_t value) {
     return 0;
 }
 void diagBarrier(void *) { __asm__ volatile("dsb sy" ::: "memory"); }
+void diagSleepMs(void *, uint32_t ms) {
+    for (uint32_t i = 0; i < ms; ++i) IOSleep(1);
+}
 int diagIpccKick(void *context, uint32_t value) {
     auto *d = static_cast<DiagCtx *>(context);
     if (!d || !d->ipccMapped || !d->ipcc.va) return -22;
@@ -647,17 +650,22 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
             dio.smem_write32 = diagSmemWrite32;
             dio.barrier = diagBarrier;
             dio.ipcc_kick = diagIpccKick;
+            dio.sleep_ms = diagSleepMs;
             dio.context = &dctx;
             picasso_mpss_glink_diag_result dro = {};
             int drc = picasso_mpss_glink_diag_write_version(&dio, &dro);
             IOLog("PICASSO_WLAN glink-liveness rc=%d error=%d wrote=%u "
                   "before=%08x/%08x/%08x/%08x desc=%u tx=%u rx=%u "
-                  "txHead=%u afterHead=%u afterRxHead=%u kick=%08x peerResponded=%u\n",
+                  "txHead=%u afterHead=%u afterRxHead=%u kick=%08x "
+                  "sampCount=%u windowMs=%u rx611=%08x/%08x "
+                  "peerResponded=%u ackSeen=%u\n",
                   drc, dro.error, (unsigned)dro.wrote,
                   dro.before[0], dro.before[1], dro.before[2], dro.before[3],
                   dro.descId, dro.txId, dro.rxId,
                   dro.txHeadWritten, dro.afterHead, dro.afterRxHead,
-                  dro.kickValue, (unsigned)dro.peerResponded);
+                  dro.kickValue, dro.sampCount, dro.windowMs,
+                  dro.rx611Cmd0, dro.rx611Cmd1,
+                  (unsigned)dro.peerResponded, (unsigned)dro.ackSeen);
         } else {
             IOLog("PICASSO_WLAN glink-liveness abort: IPCC map failed (no writes)\n");
         }
