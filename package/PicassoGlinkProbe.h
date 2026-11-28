@@ -15,6 +15,12 @@
 // candidate except the last-written one. P1b keeps ALL 32B candidates and
 // validates each by content so the next boot can disambiguate the real desc.
 //
+// P1b result (55ecca7, §9.19): real desc = 478, garbage = 605. IMPORTANT:
+// ctrl[] was all zeros, and ptrValid treats 0 as valid (8-aligned and < size).
+// Therefore validDesc=1 / sendReady=1 prove only "a desc-shaped 32B item was
+// found", NOT that the GLINK link is live. This value is a geometry result,
+// never a transport/readiness claim (see wifi-mpss-glink-wire-research.md §0).
+//
 // Classification is by geometry only:
 //   desc : size == 32           (GLINK ring control block, 4 x u32)
 //   tx   : size == 16384        (stock APPS-owned TX FIFO)

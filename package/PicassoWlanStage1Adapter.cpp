@@ -14,6 +14,7 @@
 #include <libkern/c++/OSSharedPtr.h>
 #include <kern/clock.h>
 #include <kern/task.h>
+#include <pexpert/pexpert.h>
 #include <libkern/crypto/sha2.h>
 #include <string.h>
 
@@ -23,6 +24,7 @@
 #include "FirmwareWindow.h"
 #include "WlanSmem.h"
 #include "PicassoGlinkProbe.h"
+#include "PicassoMpssGlinkDiag.h"
 #include "WlanModemLoadPlan.h"
 #include "PicassoPas.h"
 #include "PicassoRpmh.h"
@@ -149,6 +151,24 @@ int smemRead(void *context, uint32_t offset, void *out, uint32_t size) {
     return 0;
 }
 struct PollCtx { Region smem; bool smemMapped; uint64_t deadline; };
+
+// ---- controlled-write GLINK liveness diag IO (boot-arg gated, §9.21/§9.22) --
+// SMEM region is mapped writable (kIOMapInhibitCache). IPCC is mapped on demand.
+struct DiagCtx { Region *smem; Region ipcc; bool ipccMapped; };
+int diagSmemWrite32(void *context, uint32_t at, uint32_t value) {
+    auto *d = static_cast<DiagCtx *>(context);
+    if (!d || !d->smem || !d->smem->va || at > WLAN_SMEM_SIZE - 4) return -22;
+    *reinterpret_cast<volatile uint32_t *>(d->smem->va + at) = value;
+    return 0;
+}
+void diagBarrier(void *) { __asm__ volatile("dsb sy" ::: "memory"); }
+int diagIpccKick(void *context, uint32_t value) {
+    auto *d = static_cast<DiagCtx *>(context);
+    if (!d || !d->ipccMapped || !d->ipcc.va) return -22;
+    *reinterpret_cast<volatile uint32_t *>(d->ipcc.va + 0x0c) = value; // mbox SEND_ID
+    __asm__ volatile("dsb sy" ::: "memory");
+    return 0;
+}
 uint64_t nowMs(void *) {
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
@@ -677,6 +697,38 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
     // Gate state at timeout: poison/share snapshot is the upstream cause of the
     // ADSP/GPU -115/-40 seen downstream, printed here to close the causal loop.
     IOLog("PICASSO_WLAN diag-survey pasGate=%x (read-only)\n", picasso_pas_gate_snapshot());
+
+    // CONTROLLED-WRITE liveness experiment (§9.21/§9.22), OFF by default.
+    // Requires explicit boot-arg sheng-wlan-glink-liveness=1. Everything above
+    // is read-only; this block writes ONLY the three fields pinned by review:
+    // TX FIFO 480 head0={0x00010000,0}, desc478+4=8, IPCC 0x40800c=0x20000.
+    // Aborts with zero writes if the ring is not in the all-zero initial state.
+    unsigned liveness = 0;
+    if (PE_parse_boot_argn("sheng-wlan-glink-liveness", &liveness, sizeof(liveness)) && liveness == 1) {
+        DiagCtx dctx = {&ac->poll.smem, {}, false};
+        dctx.ipccMapped = mapRegion(0x00408000, 0x1000, dctx.ipcc);
+        IOLog("PICASSO_WLAN glink-liveness boot-arg=1 ipccMapped=%d\n", dctx.ipccMapped ? 1 : 0);
+        if (dctx.ipccMapped) {
+            picasso_mpss_glink_diag_io dio = {};
+            dio.smem = io; // same read callback + context
+            dio.smem_write32 = diagSmemWrite32;
+            dio.barrier = diagBarrier;
+            dio.ipcc_kick = diagIpccKick;
+            dio.context = &dctx;
+            picasso_mpss_glink_diag_result dro = {};
+            int drc = picasso_mpss_glink_diag_write_version(&dio, &dro);
+            IOLog("PICASSO_WLAN glink-liveness rc=%d error=%d wrote=%u "
+                  "before=%08x/%08x/%08x/%08x desc=%u tx=%u rx=%u "
+                  "txHead=%u afterHead=%u afterRxHead=%u kick=%08x peerResponded=%u\n",
+                  drc, dro.error, (unsigned)dro.wrote,
+                  dro.before[0], dro.before[1], dro.before[2], dro.before[3],
+                  dro.descId, dro.txId, dro.rxId,
+                  dro.txHeadWritten, dro.afterHead, dro.afterRxHead,
+                  dro.kickValue, (unsigned)dro.peerResponded);
+        } else {
+            IOLog("PICASSO_WLAN glink-liveness abort: IPCC map failed (no writes)\n");
+        }
+    }
 }
 
 }  // namespace
