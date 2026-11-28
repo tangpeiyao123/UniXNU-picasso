@@ -450,14 +450,124 @@ int cbPollPeer(void *context, struct WlanModemPeerEvent *event) {
     }
 }
 
+// ---- READ-ONLY SMP2P item dump helper (diagnostic only) ----
+// Prints an SMP2P item's 20B header (magic/ver/local/remote/total/valid) and
+// every 20B entry slot (name + value). Pure reads; no ownership writes, no
+// allocation, no state change. Used by diagSurveyPeer only.
+static void diagDumpSmp2pItem(struct wlan_smem_io *io, const char *tag,
+                              uint16_t itemId, const struct wlan_smem_item *item) {
+    uint8_t h[20] = {0};
+    if (wlan_smread(io, item->offset, h, 20)) {
+        IOLog("PICASSO_WLAN diag-dump tag=%s item=%u read-header-failed off=%x\n",
+              tag, itemId, item->offset);
+        return;
+    }
+    unsigned total = wlan_sm16(h + 12), valid = wlan_sm16(h + 14);
+    IOLog("PICASSO_WLAN diag-dump tag=%s item=%u off=%x size=%x magic=%08x ver=%u "
+          "local=%u remote=%u total=%u valid=%u\n",
+          tag, itemId, item->offset, item->size,
+          (unsigned)wlan_sm32(h + 0), (unsigned)h[4],
+          (unsigned)wlan_sm16(h + 8), (unsigned)wlan_sm16(h + 10),
+          total, valid);
+    // Never read past the item: cap slots by (size - 20)/20, matching the
+    // wire format size>=20+20*total check in wlan_smp2p_entry.
+    unsigned fit = item->size >= 20 ? (item->size - 20) / 20 : 0;
+    unsigned slots = total < 16 ? total : 16;
+    if (slots > fit) slots = fit;
+    for (unsigned i = 0; i < slots; ++i) {
+        uint8_t e[20] = {0};
+        if (wlan_smread(io, item->offset + 20 + 20 * i, e, 20)) {
+            IOLog("PICASSO_WLAN diag-dump tag=%s item=%u entry=%u read-failed\n",
+                  tag, itemId, i);
+            continue;
+        }
+        // name is 16 raw bytes; render printable ASCII, hex otherwise.
+        char name[17] = {0};
+        for (unsigned j = 0; j < 16; ++j) {
+            uint8_t c = e[j];
+            name[j] = (c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : '.';
+        }
+        name[16] = 0;
+        IOLog("PICASSO_WLAN diag-dump tag=%s item=%u entry=%u name=%s value=%08x "
+              "raw=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+              tag, itemId, i, name, (unsigned)wlan_sm32(e + 16),
+              e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
+    }
+}
+
+// Scan every partition listed in the SMEM TOC for a named "wlan" SMP2P entry.
+// Some platforms place the peer item in a host/remote pair other than (0,1) or
+// (0xfffe,0xfffe). This enumerates all TOC partitions and all their items,
+// looking for the first 4 bytes "wlan" at any item's entry table. Read-only.
+static void diagScanTocForWlan(struct wlan_smem_io *io, const char *tag) {
+    const uint32_t toc = WLAN_SMEM_SIZE - 4096;
+    uint8_t h[32] = {0};
+    if (wlan_smread(io, toc, h, 32)) return;
+    uint32_t count = wlan_sm32(h + 8);
+    if (wlan_sm32(h) != 0x434f5424 || wlan_sm32(h + 4) != 1 || count > 64) return;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint8_t e[48] = {0};
+        if (wlan_smread(io, toc + 32 + 48 * i, e, 48)) continue;
+        uint16_t x = wlan_sm16(e + 12), y = wlan_sm16(e + 14);
+        struct wlan_smem_partition p = {};
+        if (wlan_smem_partition(io, x, y, &p)) continue;
+        // Walk the uncached item table; for each a5a5 item, probe its entries
+        // for a "wlan" name. Bounded by partition size / 16.
+        uint32_t at = 32, visited = 0;
+        while (at + 16 <= p.uncached && visited < 256) {
+            ++visited;
+            uint8_t ih[16] = {0};
+            if (wlan_smread(io, p.offset + at, ih, 16)) break;
+            if (wlan_sm16(ih) != 0xa5a5) break;
+            uint32_t isz = wlan_sm32(ih + 4), hdr = wlan_sm16(ih + 10);
+            uint16_t id = wlan_sm16(ih + 2);
+            uint16_t pad = wlan_sm16(ih + 8);
+            if (!isz || pad >= isz || hdr > p.uncached - at - 16 ||
+                isz > p.uncached - at - 16 - hdr) break;
+            uint32_t ioff = p.offset + at + 16 + hdr;
+            uint32_t isize = isz - pad;
+            uint8_t wh[20] = {0};
+            if (isize >= 20 && !wlan_smread(io, ioff, wh, 20) &&
+                wlan_sm32(wh) == 0x504d5324 && wh[4] == 1) {
+                unsigned total = wlan_sm16(wh + 12);
+                if (total > 16) total = 16;
+                unsigned fit = (isize - 20) / 20;
+                if (total > fit) total = fit;
+                for (unsigned k = 0; k < total; ++k) {
+                    uint8_t ee[20] = {0};
+                    if (wlan_smread(io, ioff + 20 + 20 * k, ee, 20)) break;
+                    if (ee[0] == 'w' && ee[1] == 'l' && ee[2] == 'a' && ee[3] == 'n' &&
+                        ee[4] == 0) {
+                        IOLog("PICASSO_WLAN diag-scan tag=%s toc=%u host=%u remote=%u "
+                              "item=%u off=%x local=%u remote_pid=%u total=%u "
+                              "wlan-slot=%u value=%08x\n",
+                              tag, i, x, y, id, ioff,
+                              (unsigned)wlan_sm16(wh + 8), (unsigned)wlan_sm16(wh + 10),
+                              (unsigned)wlan_sm16(wh + 12), k,
+                              (unsigned)wlan_sm32(ee + 16));
+                    }
+                }
+            }
+            at += 16 + hdr + isz;
+            if (at & 7) break;
+        }
+    }
+    IOLog("PICASSO_WLAN diag-scan tag=%s complete count=%u\n", tag, (unsigned)count);
+}
+
 // ---- READ-ONLY peer-timeout survey (diagnostic only, zero control flow) ----
 // Invoked once after execute() returns -60 (peer timeout). Everything below is
-// observation: no PAS/RPMH/AOP/SMEM writes, no state mutation, no retry. It
-// distinguishes two root causes that the -2-only poll stream cannot:
-//   (a) MPSS never ran -> both private (0,1) and global (0xfffe) SMP2P partitions
-//       contain no item 435/428, and the carveout entry point is still untouched;
-//   (b) reader looked in the wrong place -> items exist but cbPollPeer's private-
-//       only partition search never reached them.
+// observation: no PAS/RPMH/AOP/SMEM writes, no state mutation, no retry.
+// diag3 settled the earlier A/B question: TOC is valid (magic 434f5424) and
+// item 435 EXISTS in the private (0,1) partition (find=0, size=154), so neither
+// "MPSS never ran" nor "wrong partition" explains the -60. diag4 therefore
+// answers the remaining question: does item 435 actually carry a "wlan" entry?
+//   (c) header valid but valid=0 / no "wlan" name / value=0 -> cbPollPeer's
+//       wlan_smp2p_wlan returns -2, poll stream sees "not ready" until deadline;
+//   (d) "wlan" entry exists in some OTHER TOC partition not visited by
+//       cbPollPeer's (0,1)/(0xfffe) probes -> reader placement bug.
+// Full header+entry dump (diagDumpSmp2pItem) and whole-TOC "wlan" scan
+// (diagScanTocForWlan) distinguish (c) from (d) in one boot.
 static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
     if (!ac || !ac->poll.smemMapped) {
         IOLog("PICASSO_WLAN diag-survey result=%d now=%llu smemMapped=0 (no survey)\n",
@@ -498,8 +608,19 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
             IOLog("PICASSO_WLAN diag-survey partition[%u] item=%u find=%d "
                   "item-off=%x item-size=%x\n",
                   pi, ids[k], ferr, item.offset, item.size);
+            // diag4: full header + every entry slot for items that exist.
+            // This is the decisive evidence: an item can be present (find=0)
+            // yet carry no "wlan" entry (valid=0 / different name / value=0),
+            // which makes cbPollPeer return -2 and the peer wait time out.
+            if (ferr == 0)
+                diagDumpSmp2pItem(&io, pi == 0 ? "priv" : "glob", ids[k], &item);
         }
     }
+
+    // diag4: enumerate ALL TOC partitions and locate any "wlan"-named SMP2P
+    // entry, in case the peer item is authored into a host/remote pair that
+    // neither cbPollPeer (0,1)/(0xfffe) nor the two probes above visit.
+    diagScanTocForWlan(&io, "toc-all");
 
     // Execution-point evidence: read the first 32 bytes at e_entry from the
     // still-mapped carveout. If MPSS never executed, this is the raw ELF payload;
