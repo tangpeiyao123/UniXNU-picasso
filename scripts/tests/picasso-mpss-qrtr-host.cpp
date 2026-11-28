@@ -85,8 +85,11 @@ static void caseOk() {
     g_reads = 0;
     CHECK(picasso_mpss_glink_probe(&io, &pr) == 0);
     CHECK(pr.cand == 3 && pr.descPresent && pr.txPresent && pr.rxPresent);
-    CHECK(pr.descId == 900 && pr.txId == 901 && pr.rxId == 902);
-    CHECK(pr.stable && pr.sendReady);
+    CHECK(pr.descCount == 1 && pr.desc[0].id == 900);
+    CHECK(pr.txId == 901 && pr.rxId == 902);
+    CHECK(pr.validDesc == 1 && pr.sendReady);
+    CHECK(pr.desc[0].stable && pr.desc[0].ptrValid && pr.desc[0].valid);
+    CHECK(pr.desc[0].ctrl[4] == 128); // TX head byte 0
     CHECK(g_reads > 0);
 }
 
@@ -99,23 +102,49 @@ static void caseNoCandidate() {
     CHECK(picasso_mpss_glink_probe(&io, &pr) == -2);
 }
 
-static void caseAmbiguous() {
+// Mirror the P1 on-device topology exactly (console-p1-boot2.log / §9.15):
+//   tx=480/16384, rx=611/4096, two 32B candidates (one was reported as 605;
+//   the other's id was lost by the old probe). Only one 32B item is a real
+//   GLINK ring control block. The probe must record BOTH and select the real
+//   one by content -- not early-return -22 and not keep only the last.
+static void caseTwoDescDisambiguate() {
     beginPartition();
-    addItem(910, 32); addItem(911, 32); // two desc candidates
+    uint32_t junk = addItem(605, 32);  // 32B candidate reported by P1
+    uint32_t real = addItem(606, 32);  // other 32B candidate (P1 lost its id)
+    addItem(480, 16384);              // TX FIFO, id from P1 log
+    addItem(611, 4096);               // RX FIFO, id from P1 log
+    put32(junk, 0xdeadbeef); put32(junk+4, 0xdeadbeef); // garbage pointers
+    put32(real, 0); put32(real+4, 256); // TX tail=0, head=256 inside 16384
+    put32(real+8, 0); put32(real+12, 128);
     finishPartition();
     wlan_smem_io io = {nullptr, smemRead};
     picasso_glink_probe_result pr = {};
-    CHECK(picasso_mpss_glink_probe(&io, &pr) == -22);
+    CHECK(picasso_mpss_glink_probe(&io, &pr) == 0);
+    CHECK(pr.txId == 480 && pr.txSize == 16384); // topology locked to P1 log
+    CHECK(pr.rxId == 611 && pr.rxSize == 4096);
+    CHECK(pr.descCount == 2);          // BOTH candidates recorded (P1 bug fixed)
+    CHECK(pr.roles[0] == 2);
+    CHECK(pr.validDesc == 1 && pr.sendReady);
+    // Disambiguation is by pointer content, matching the on-device mechanism.
+    bool junkValid = false, realValid = false;
+    for (uint32_t n = 0; n < pr.descCount; ++n) {
+        if (pr.desc[n].id == 605 && pr.desc[n].valid) junkValid = true;
+        if (pr.desc[n].id == 606 && pr.desc[n].valid) realValid = true;
+    }
+    CHECK(!junkValid && realValid);
 }
 
 static int g_descReads = 0;
-static uint32_t g_descDataOff = 0;
+static uint32_t g_descDataOff = 0, g_descDataOff2 = 0;
+static int g_flipA = 0, g_flipB = 0;
 static int smemReadFlipDesc(void *ctx, uint32_t off, void *out, uint32_t len) {
     int rc = smemRead(ctx, off, out, len);
-    // Simulate a concurrent peer update: corrupt the desc payload only on the
-    // second read of that exact range so the probe's two reads disagree.
-    if (rc == 0 && off == g_descDataOff && len >= 16) {
-        if (++g_descReads == 2) (static_cast<uint8_t *>(out))[0] ^= 0x01;
+    // Simulate a concurrent peer update: corrupt a desc payload on the SECOND
+    // read of that exact offset so the probe's two reads disagree. Counters
+    // are per-offset so multiple candidates can each be made unstable.
+    if (rc == 0 && len >= 16) {
+        if (off == g_descDataOff && ++g_flipA == 2) (static_cast<uint8_t *>(out))[0] ^= 0x01;
+        if (off == g_descDataOff2 && ++g_flipB == 2) (static_cast<uint8_t *>(out))[0] ^= 0x01;
     }
     return rc;
 }
@@ -125,11 +154,28 @@ static void caseUnstable() {
     addItem(921, 16384);
     put32(desc, 0); put32(desc+4, 128);
     finishPartition();
-    g_descDataOff = desc; g_descReads = 0;
+    g_descDataOff = desc; g_descDataOff2 = 0; g_descReads = 0; g_flipA = 0; g_flipB = 0;
     wlan_smem_io io = {nullptr, smemReadFlipDesc};
     picasso_glink_probe_result pr = {};
     CHECK(picasso_mpss_glink_probe(&io, &pr) == -11);
     g_descReads = 0;
+}
+
+// All 32B candidates unstable -> retryable -11 (not confused with no-desc).
+static void caseAllUnstable() {
+    beginPartition();
+    uint32_t a = addItem(700, 32);
+    uint32_t b = addItem(701, 32);
+    addItem(702, 16384);
+    put32(a, 0); put32(a+4, 128);
+    put32(b, 0); put32(b+4, 128);
+    finishPartition();
+    g_descDataOff = a; g_descDataOff2 = b; g_descReads = 0; g_flipA = 0; g_flipB = 0;
+    wlan_smem_io io = {nullptr, smemReadFlipDesc};
+    picasso_glink_probe_result pr = {};
+    CHECK(picasso_mpss_glink_probe(&io, &pr) == -11);
+    CHECK(pr.descCount == 2);
+    g_descReads = 0; g_flipA = 0; g_flipB = 0;
 }
 
 static void caseNoPartition() {
@@ -193,7 +239,8 @@ int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "all";
     if (!std::strcmp(mode,"all") || !std::strcmp(mode,"ok")) caseOk();
     if (!std::strcmp(mode,"all") || !std::strcmp(mode,"nocand")) caseNoCandidate();
-    if (!std::strcmp(mode,"all") || !std::strcmp(mode,"ambig")) caseAmbiguous();
+    if (!std::strcmp(mode,"all") || !std::strcmp(mode,"twodesc")) caseTwoDescDisambiguate();
+    if (!std::strcmp(mode,"all") || !std::strcmp(mode,"allunstable")) caseAllUnstable();
     if (!std::strcmp(mode,"all") || !std::strcmp(mode,"unstable")) caseUnstable();
     if (!std::strcmp(mode,"all") || !std::strcmp(mode,"nopart")) caseNoPartition();
     if (!std::strcmp(mode,"all") || !std::strcmp(mode,"badtx")) caseBadTxPointer();

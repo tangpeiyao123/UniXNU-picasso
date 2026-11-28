@@ -577,24 +577,35 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
     }
     struct wlan_smem_io io = {&ac->poll.smem, smemRead};
 
-    // P1 self-check (§4.9): read-only MPSS GLINK geometry discovery. Printed
-    // FIRST so diag4's port-lost truncation cannot hide the decisive fields.
-    // This is a one-shot falsification of the "reuse ADSP 478/479/480 on MPSS"
-    // assumption; it does not open a channel, bind QMI, or touch hardware.
+    // P1/P1b self-check (§4.9/§9.15): read-only MPSS GLINK geometry discovery.
+    // Printed FIRST so port-lost truncation cannot hide the decisive fields.
+    // P1 boot found TWO 32B desc candidates; P1b prints EVERY candidate with
+    // its own double-read/pointer validity so the next boot can pick the real
+    // desc. No channel open, no QMI, no kick, no hardware write.
     {
         struct picasso_glink_probe_result pr = {};
         int gerr = picasso_mpss_glink_probe(&io, &pr);
         IOLog("PICASSO_WLAN mpss-glink-check part=0/1 err=%d cand=%u "
-              "roles=%u/%u/%u descPresent=%u txPresent=%u rxPresent=%u sendReady=%u "
-              "desc=%u/%u tx=%u/%u rx=%u/%u stable=%u kick=unknown\n",
+              "roles=%u/%u/%u descCount=%u validDesc=%u "
+              "tx=%u/%u rx=%u/%u sendReady=%u kick=unknown\n",
               gerr, (unsigned)pr.cand,
               (unsigned)pr.roles[0], (unsigned)pr.roles[1], (unsigned)pr.roles[2],
-              (unsigned)pr.descPresent, (unsigned)pr.txPresent,
-              (unsigned)pr.rxPresent, (unsigned)pr.sendReady,
-              (unsigned)pr.descId, (unsigned)pr.descSize,
+              (unsigned)pr.descCount, (unsigned)pr.validDesc,
               (unsigned)pr.txId, (unsigned)pr.txSize,
               (unsigned)pr.rxId, (unsigned)pr.rxSize,
-              (unsigned)pr.stable);
+              (unsigned)pr.sendReady);
+        for (unsigned n = 0; n < pr.descCount; ++n) {
+            const auto &d = pr.desc[n];
+            IOLog("PICASSO_WLAN mpss-glink-desc n=%u id=%u off=%x size=%u "
+                  "stable=%u ptrValid=%u valid=%u "
+                  "ctrl=%08x/%08x/%08x/%08x\n",
+                  n, (unsigned)d.id, d.off, (unsigned)d.size,
+                  (unsigned)d.stable, (unsigned)d.ptrValid, (unsigned)d.valid,
+                  (unsigned)((uint32_t)d.ctrl[0] | ((uint32_t)d.ctrl[1]<<8) | ((uint32_t)d.ctrl[2]<<16) | ((uint32_t)d.ctrl[3]<<24)),
+                  (unsigned)((uint32_t)d.ctrl[4] | ((uint32_t)d.ctrl[5]<<8) | ((uint32_t)d.ctrl[6]<<16) | ((uint32_t)d.ctrl[7]<<24)),
+                  (unsigned)((uint32_t)d.ctrl[8] | ((uint32_t)d.ctrl[9]<<8) | ((uint32_t)d.ctrl[10]<<16) | ((uint32_t)d.ctrl[11]<<24)),
+                  (unsigned)((uint32_t)d.ctrl[12] | ((uint32_t)d.ctrl[13]<<8) | ((uint32_t)d.ctrl[14]<<16) | ((uint32_t)d.ctrl[15]<<24)));
+        }
     }
 
     // SMEM header sanity + raw TOC header (read-only). Keep SMEM version in its
