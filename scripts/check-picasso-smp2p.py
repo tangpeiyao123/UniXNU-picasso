@@ -36,7 +36,7 @@ def main():
     for sanitized in (False, True):
         suffix = '-asan' if sanitized else ''
         flags = (['-fsanitize=address' if os.name=='nt' else '-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if sanitized else [])
-        for name in ('smp2p','smp2p-device','glink','qrtr','qmi','servloc','tftp','fastrpc','rpc-fs','tfa'):
+        for name in ('smp2p','smp2p-device','glink','qrtr','mpss-qrtr','qmi','servloc','tftp','fastrpc','rpc-fs','tfa'):
             exe = out/(name+suffix+('.exe' if os.name=='nt' else ''))
             run(name+'-compile'+suffix, [a.cxx,'-std=c++17','-O1','-Wall','-Wextra','-Werror',*flags,*includes,
                 str(ROOT/f'scripts/tests/picasso-{name}-host.cpp'),str(core),str(ROOT/'package/PicassoGlink.cpp'),str(ROOT/'package/PicassoRpcFs.cpp'),'-o',str(exe)])
@@ -91,7 +91,9 @@ def main():
         'package/PicassoSmemLock.h','package/PicassoAdspBoot.h','package/PicassoAdsp.h','drivers/NativeWlan/WlanSmem.h','drivers/NativeAdrenoPicasso/PicassoRpmh.h',
         'scripts/check-picasso-smp2p.py','scripts/tests/picasso-smp2p-host.cpp','scripts/tests/picasso-smp2p-device-host.cpp',
         'scripts/tests/picasso-wlan-kernel-api.h','scripts/build-picasso-display.py',
-        'scripts/check-picasso-display-artifacts.py','.github/workflows/host-checks.yml']
+        'scripts/check-picasso-display-artifacts.py','.github/workflows/host-checks.yml',
+        'package/PicassoGlinkProbe.h','scripts/tests/picasso-mpss-qrtr-host.cpp',
+        'package/PicassoWlanWlfw.h','package/PicassoWlanWlfw.cpp']
     (out/'results.json').write_text(json.dumps(dict(passed=True,hardware_tested=False,kernel_sdk_compiled=False,
         dsp_started=False,runs=runs,inputs={n:hashlib.sha256((ROOT/n).read_bytes()).hexdigest() for n in inputs}),indent=2)+'\n',encoding='utf8',newline='\n')
     print('PASS SMEM locked allocation, SMP2P service and ARM64 API model')

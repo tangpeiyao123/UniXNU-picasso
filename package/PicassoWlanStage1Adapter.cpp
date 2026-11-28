@@ -22,6 +22,7 @@
 #include "PicassoFat.h"
 #include "FirmwareWindow.h"
 #include "WlanSmem.h"
+#include "PicassoGlinkProbe.h"
 #include "WlanModemLoadPlan.h"
 #include "PicassoPas.h"
 #include "PicassoRpmh.h"
@@ -575,6 +576,26 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
         return;
     }
     struct wlan_smem_io io = {&ac->poll.smem, smemRead};
+
+    // P1 self-check (§4.9): read-only MPSS GLINK geometry discovery. Printed
+    // FIRST so diag4's port-lost truncation cannot hide the decisive fields.
+    // This is a one-shot falsification of the "reuse ADSP 478/479/480 on MPSS"
+    // assumption; it does not open a channel, bind QMI, or touch hardware.
+    {
+        struct picasso_glink_probe_result pr = {};
+        int gerr = picasso_mpss_glink_probe(&io, &pr);
+        IOLog("PICASSO_WLAN mpss-glink-check part=0/1 err=%d cand=%u "
+              "roles=%u/%u/%u descPresent=%u txPresent=%u rxPresent=%u sendReady=%u "
+              "desc=%u/%u tx=%u/%u rx=%u/%u stable=%u kick=unknown\n",
+              gerr, (unsigned)pr.cand,
+              (unsigned)pr.roles[0], (unsigned)pr.roles[1], (unsigned)pr.roles[2],
+              (unsigned)pr.descPresent, (unsigned)pr.txPresent,
+              (unsigned)pr.rxPresent, (unsigned)pr.sendReady,
+              (unsigned)pr.descId, (unsigned)pr.descSize,
+              (unsigned)pr.txId, (unsigned)pr.txSize,
+              (unsigned)pr.rxId, (unsigned)pr.rxSize,
+              (unsigned)pr.stable);
+    }
 
     // SMEM header sanity + raw TOC header (read-only). Keep SMEM version in its
     // own variable: the TOC read below overwrites hdr[].

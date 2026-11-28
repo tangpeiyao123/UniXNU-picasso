@@ -106,6 +106,68 @@ struct PicassoWlanWlfwState {
     bool hardwareTouched;    // must remain false in this skeleton
 };
 
+// ---- First-hand WLFW QMI message ids + canonical sequence (P1 protocol prep) ----
+// Source: ath10k-ct qmi_wlfw_v01.h:10-11 and qmi.c (one-hand WCN3990/ath10k),
+// cross-checked by the Trogdor WCN3990 plan. These are QMI message ids, NOT the
+// step1 W_REQ_* enum numbers used by the offline skeleton below. They are
+// recorded here as PROTOCOL REFERENCE ONLY: picasso_wlan_wlfw_execute() still
+// drives the step1 W_REQ_* sequence unchanged, and no constant here is wired
+// into a real transport. See BRINGUP_STATE.md §9.10 and wifi-qmi-wlfw-research.md.
+enum PicassoWlfwMsgId : uint32_t {
+    PicassoWlfwMsgIndRegister = 0x20, // QMI_WLFW_IND_REGISTER_REQ
+    PicassoWlfwMsgFwReadyInd  = 0x21, // indication (not a request)
+    PicassoWlfwMsgWlanMode    = 0x22,
+    PicassoWlfwMsgWlanCfg     = 0x23,
+    PicassoWlfwMsgCap         = 0x24,
+    PicassoWlfwMsgBdfDownload = 0x25,
+    PicassoWlfwMsgCalReport   = 0x26,
+    PicassoWlfwMsgMsaInfo     = 0x2d,
+    PicassoWlfwMsgMsaReady    = 0x2e,
+    PicassoWlfwMsgHostCap     = 0x34,
+};
+enum PicassoWlfwSeqKind : uint32_t {
+    PicassoWlfwSeqRequest = 0, // send_request callback boundary
+    PicassoWlfwSeqInd     = 1, // wait_indication callback boundary
+    PicassoWlfwSeqNoCb    = 2, // NO callback boundary in PicassoWlanWlfwIo
+    PicassoWlfwSeqPlan    = 3, // pure page arithmetic, no QMI wire
+};
+struct PicassoWlfwSeqStep { const char *phase; uint32_t msgId; uint32_t kind; };
+// Canonical one-hand order. Three steps have no callback boundary in the
+// injected Io (SCM assign_mem, BDF_DOWNLOAD, CAL_REPORT): completing the real
+// switch-over requires extending PicassoWlanWlfwIo and is a P2+ decision.
+static const PicassoWlfwSeqStep picasso_wlfw_sequence[] = {
+    {"ind-register", PicassoWlfwMsgIndRegister, PicassoWlfwSeqRequest},
+    {"host-cap",     PicassoWlfwMsgHostCap,     PicassoWlfwSeqRequest},
+    {"msa-info",     PicassoWlfwMsgMsaInfo,     PicassoWlfwSeqRequest},
+    {"scm-assign",   0,                         PicassoWlfwSeqNoCb},     // no WLFW msg id
+    {"msa-ready",    PicassoWlfwMsgMsaReady,    PicassoWlfwSeqRequest},
+    {"cap",          PicassoWlfwMsgCap,         PicassoWlfwSeqRequest},
+    {"fw-ready",     PicassoWlfwMsgFwReadyInd,  PicassoWlfwSeqInd},
+    {"bdf-download", PicassoWlfwMsgBdfDownload, PicassoWlfwSeqNoCb},
+    {"cal-report",   PicassoWlfwMsgCalReport,   PicassoWlfwSeqNoCb},
+    {"wlan-cfg",     PicassoWlfwMsgWlanCfg,     PicassoWlfwSeqRequest},
+    {"wlan-mode",    PicassoWlfwMsgWlanMode,    PicassoWlfwSeqRequest},
+};
+static const unsigned picasso_wlfw_sequence_len =
+    sizeof(picasso_wlfw_sequence) / sizeof(picasso_wlfw_sequence[0]);
+// Read-only self-check: confirms the reference table is internally consistent
+// (non-empty, distinct nonzero msg ids except the one no-id SCM step, exactly
+// three NoCb steps). Does not touch any transport state. Host-assertable.
+inline int picasso_wlfw_sequence_check() {
+    unsigned noCb = 0, ids = 0;
+    for (unsigned i = 0; i < picasso_wlfw_sequence_len; ++i) {
+        const auto &s = picasso_wlfw_sequence[i];
+        if (!s.phase) return -22;
+        if (s.kind == PicassoWlfwSeqNoCb) { ++noCb; continue; }
+        if (!s.msgId) return -22;
+        for (unsigned j = 0; j < i; ++j)
+            if (picasso_wlfw_sequence[j].kind != PicassoWlfwSeqNoCb &&
+                picasso_wlfw_sequence[j].msgId == s.msgId) return -22;
+        ++ids;
+    }
+    return (noCb == 3 && ids == 8) ? 0 : -22;
+}
+
 // All hardware/system boundaries are injected. The host harness supplies
 // deterministic stand-ins; a future on-device adapter supplies real IO.
 struct PicassoWlanWlfwIo {

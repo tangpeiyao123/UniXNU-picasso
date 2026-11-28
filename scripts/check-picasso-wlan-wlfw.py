@@ -72,6 +72,12 @@ def main():
     for forbidden in ['ATH11K_QMI_WLFW_SERVICE_ID_V01', 'WCN6750', 'service==0x42',
                       '0x89200000', '0x02800000', 'ath10k']:
         check(forbidden.lower() not in impl.lower(), 'forbidden symbol in skeleton: ' + forbidden)
+    # Header blind-spot: a fabricated WCN6750/ath11k service id must never be
+    # minted in the header either. Source attributions in comments are allowed
+    # (they carry the "SECOND-HAND / never injected" disclaimer); only the
+    # concrete fabricated-id symbol is forbidden.
+    check('ATH11K_QMI_WLFW_SERVICE_ID_V01' not in hdr,
+          'fabricated WCN6750 service id in header')
     check('svc.service != cfg->service || svc.instance != cfg->instance' in impl,
           'missing four-dimensional discovery match (modem binding)')
     check('cfg->provisional || unresolved' in impl, 'missing fabrication guard')

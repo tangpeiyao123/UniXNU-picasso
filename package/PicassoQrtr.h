@@ -8,6 +8,13 @@
 #include "PicassoTftp.h"
 enum { PicassoQrtrServices = 64, PicassoQrtrQueue = 8, PicassoQrtrWords = (32+PicassoTftpBytes+3)/4 };
 static constexpr uint32_t PicassoQrtrControl = 0xfffffffeU;
+// Tentative WLFW QMI discovery candidate. This service number is SECOND-HAND
+// (ath10k-ct qmi_wlfw_v01.h + Trogdor WCN3990), NOT a first-hand Picasso fact.
+// It is offered only to a read-only lookup below and never injected into a
+// PicassoWlanWlfwConfig (which stays provisional until on-device discovery).
+// See BRINGUP_STATE.md §9.10 / HONESTY CONTRACT in PicassoWlanWlfw.h.
+static constexpr uint32_t PicassoQrtrWlfwService  = 0x45u;
+static constexpr uint32_t PicassoQrtrWlfwInstance = 0u;
 struct PicassoQrtrService { uint32_t service, instance, node, port; bool used; };
 struct PicassoQrtr {
     PicassoQrtrService services[PicassoQrtrServices];
@@ -48,6 +55,22 @@ inline void picasso_qrtr_invalidate(PicassoQrtr *q, int error) {
     q->helloReceived=false; q->helloSent=false; q->count=0; q->error=error;
     q->locator.announced=false;picasso_tftp_invalidate(&q->tftp);
     for (auto &s:q->services) s.used=false;
+}
+// READ-ONLY discovery lookup: does the services[] table currently hold an
+// announcement for (service,instance)? On match, copy node/port into out and
+// return true; otherwise false. Never mutates state, never binds QMI, and
+// node/port are taken verbatim from the peer's NEW_SERVER (never synthesized).
+// Used by diagnostics to observe WLFW 0x45 without fabricating a transport.
+inline bool picasso_qrtr_lookup(const PicassoQrtr *q, uint32_t service, uint32_t instance,
+                                uint32_t *node, uint32_t *port) {
+    if (!q) return false;
+    for (const auto &s : q->services)
+        if (s.used && s.service == service && s.instance == instance) {
+            if (node) *node = s.node;
+            if (port) *port = s.port;
+            return true;
+        }
+    return false;
 }
 // -11 retains the complete GLINK receive buffer for retry, without consuming
 // a packet twice. RESUME_TX acknowledges transport receipt, never QMI success.
