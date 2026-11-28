@@ -628,6 +628,41 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
         }
     }
 
+    // CONTROLLED-WRITE liveness experiment (§9.21/§9.22/§9.26), OFF by default.
+    // P1d: placed IMMEDIATELY after mpss-glink-check, before all read-only
+    // survey dumps, because serial capture truncates at a fixed point later in
+    // this function -- results must print inside the reliable early window.
+    // Requires explicit boot-arg sheng-wlan-glink-liveness=1. Writes ONLY the
+    // three fields pinned by review: TX FIFO 480 head0={0x00010000,0},
+    // desc478+4=8, IPCC 0x40800c=0x20000; abort with ZERO writes if the ring
+    // is not all-zero. No channel open, no QMI, no WLFW.
+    unsigned liveness = 0;
+    if (PE_parse_boot_argn("sheng-wlan-glink-liveness", &liveness, sizeof(liveness)) && liveness == 1) {
+        DiagCtx dctx = {&ac->poll.smem, {}, false};
+        dctx.ipccMapped = mapRegion(0x00408000, 0x1000, dctx.ipcc);
+        IOLog("PICASSO_WLAN glink-liveness boot-arg=1 ipccMapped=%d\n", dctx.ipccMapped ? 1 : 0);
+        if (dctx.ipccMapped) {
+            picasso_mpss_glink_diag_io dio = {};
+            dio.smem = io; // same read callback + context
+            dio.smem_write32 = diagSmemWrite32;
+            dio.barrier = diagBarrier;
+            dio.ipcc_kick = diagIpccKick;
+            dio.context = &dctx;
+            picasso_mpss_glink_diag_result dro = {};
+            int drc = picasso_mpss_glink_diag_write_version(&dio, &dro);
+            IOLog("PICASSO_WLAN glink-liveness rc=%d error=%d wrote=%u "
+                  "before=%08x/%08x/%08x/%08x desc=%u tx=%u rx=%u "
+                  "txHead=%u afterHead=%u afterRxHead=%u kick=%08x peerResponded=%u\n",
+                  drc, dro.error, (unsigned)dro.wrote,
+                  dro.before[0], dro.before[1], dro.before[2], dro.before[3],
+                  dro.descId, dro.txId, dro.rxId,
+                  dro.txHeadWritten, dro.afterHead, dro.afterRxHead,
+                  dro.kickValue, (unsigned)dro.peerResponded);
+        } else {
+            IOLog("PICASSO_WLAN glink-liveness abort: IPCC map failed (no writes)\n");
+        }
+    }
+
     // SMEM header sanity + raw TOC header (read-only). Keep SMEM version in its
     // own variable: the TOC read below overwrites hdr[].
     uint8_t hdr[32] = {0};
@@ -696,39 +731,10 @@ static void diagSurveyPeer(AdapterCtx *ac, uint64_t now, int result) {
 
     // Gate state at timeout: poison/share snapshot is the upstream cause of the
     // ADSP/GPU -115/-40 seen downstream, printed here to close the causal loop.
+    // NOTE: the controlled-write liveness block was moved to the TOP of this
+    // function (right after mpss-glink-check) in P1d because serial capture is
+    // truncated at a fixed point here (§9.26) -- results must print early.
     IOLog("PICASSO_WLAN diag-survey pasGate=%x (read-only)\n", picasso_pas_gate_snapshot());
-
-    // CONTROLLED-WRITE liveness experiment (§9.21/§9.22), OFF by default.
-    // Requires explicit boot-arg sheng-wlan-glink-liveness=1. Everything above
-    // is read-only; this block writes ONLY the three fields pinned by review:
-    // TX FIFO 480 head0={0x00010000,0}, desc478+4=8, IPCC 0x40800c=0x20000.
-    // Aborts with zero writes if the ring is not in the all-zero initial state.
-    unsigned liveness = 0;
-    if (PE_parse_boot_argn("sheng-wlan-glink-liveness", &liveness, sizeof(liveness)) && liveness == 1) {
-        DiagCtx dctx = {&ac->poll.smem, {}, false};
-        dctx.ipccMapped = mapRegion(0x00408000, 0x1000, dctx.ipcc);
-        IOLog("PICASSO_WLAN glink-liveness boot-arg=1 ipccMapped=%d\n", dctx.ipccMapped ? 1 : 0);
-        if (dctx.ipccMapped) {
-            picasso_mpss_glink_diag_io dio = {};
-            dio.smem = io; // same read callback + context
-            dio.smem_write32 = diagSmemWrite32;
-            dio.barrier = diagBarrier;
-            dio.ipcc_kick = diagIpccKick;
-            dio.context = &dctx;
-            picasso_mpss_glink_diag_result dro = {};
-            int drc = picasso_mpss_glink_diag_write_version(&dio, &dro);
-            IOLog("PICASSO_WLAN glink-liveness rc=%d error=%d wrote=%u "
-                  "before=%08x/%08x/%08x/%08x desc=%u tx=%u rx=%u "
-                  "txHead=%u afterHead=%u afterRxHead=%u kick=%08x peerResponded=%u\n",
-                  drc, dro.error, (unsigned)dro.wrote,
-                  dro.before[0], dro.before[1], dro.before[2], dro.before[3],
-                  dro.descId, dro.txId, dro.rxId,
-                  dro.txHeadWritten, dro.afterHead, dro.afterRxHead,
-                  dro.kickValue, (unsigned)dro.peerResponded);
-        } else {
-            IOLog("PICASSO_WLAN glink-liveness abort: IPCC map failed (no writes)\n");
-        }
-    }
 }
 
 }  // namespace
